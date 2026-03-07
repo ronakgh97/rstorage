@@ -1,13 +1,15 @@
 use anyhow::Result;
 use clap::Parser;
 use r_storage::args::{ServerArgs, ServerCommands};
+use r_storage::service::serve;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let args = ServerArgs::parse();
 
     match args.command {
-        Some(ServerCommands::Serve { .. }) => {
-            todo!()
+        Some(ServerCommands::Serve { port }) => {
+            serve(port).await?;
         }
         None => {
             ascii_art();
