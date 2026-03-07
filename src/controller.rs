@@ -1,9 +1,9 @@
 use crate::service::get_storage_path;
 use anyhow::Result;
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Request};
+use axum::extract::{DefaultBodyLimit, Path, Request};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use dashmap::DashMap;
@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 use std::time::Instant;
 use tokio::io::AsyncWriteExt;
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 static START_TIME: OnceLock<chrono::DateTime<chrono::Local>> = OnceLock::new();
@@ -72,9 +73,9 @@ pub async fn status_handler() -> impl IntoResponse {
 }
 
 #[derive(Deserialize, Serialize)]
-struct UploadStatus {
-    file_id: String,
-    time_took: f64,
+pub struct UploadStatus {
+    pub file_id: String,
+    pub time_took: f64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -173,7 +174,7 @@ pub async fn upload_handler(request: Request<Body>) -> impl IntoResponse {
     // Flush remaining buffer if it's the last chunk or whatever is left
     if !buffer.is_empty() {
         file.write_all(&buffer).await.unwrap();
-        buffer.clear();
+        // buffer.clear();
     }
 
     file.flush().await.unwrap();
@@ -186,6 +187,8 @@ pub async fn upload_handler(request: Request<Body>) -> impl IntoResponse {
             "Hash mismatch for file_id={}: expected {}, got {}",
             file_id, file_hash, computed_hash
         );
+
+        ON_GOINGS.remove(&file_id);
         // Clean up the uploaded file if hash verification fails
         tokio::fs::remove_file(&path).await.unwrap();
         return (
@@ -202,6 +205,8 @@ pub async fn upload_handler(request: Request<Body>) -> impl IntoResponse {
             "Size mismatch for file_id={}: expected {} bytes, got {} bytes",
             file_id, file_size, received_bytes
         );
+
+        ON_GOINGS.remove(&file_id);
         // Clean up the uploaded file if size verification fails
         tokio::fs::remove_file(&path).await.unwrap();
         return (
@@ -238,6 +243,52 @@ pub async fn upload_handler(request: Request<Body>) -> impl IntoResponse {
     (StatusCode::OK, Json(UploadStatus { file_id, time_took }))
 }
 
-pub async fn download_handler() -> String {
-    "Download handler".to_string()
+type DownloadResult = Result<Response<Body>, (StatusCode, String)>;
+
+pub async fn download_handler(Path(id): Path<String>, headers: HeaderMap) -> DownloadResult {
+    // TODO: Implement file key validation and authentication later
+    let _file_key = headers
+        .get("x-file-key")
+        .and_then(|v| v.to_str().ok())
+        .ok_or((StatusCode::BAD_REQUEST, "Missing file key".to_string()))?;
+
+    let sanitized_id = id
+        .replace("-", "_")
+        .replace("/", "_")
+        .replace(".", "_")
+        .replace("\\", "_");
+
+    let storage_path = get_storage_path()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let meta_path = storage_path.join(format!("{}.meta", &sanitized_id));
+    let file_path = storage_path.join(&sanitized_id);
+
+    let metadata_content = tokio::fs::read_to_string(&meta_path)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, "File not found".to_string()))?;
+
+    let metadata: Metadata = serde_json::from_str(&metadata_content).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to parse metadata".to_string(),
+        )
+    })?;
+
+    let file = tokio::fs::File::open(&file_path)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, "File not found".to_string()))?;
+
+    let stream = ReaderStream::new(file);
+    let body = Body::from_stream(stream);
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/octet-stream")
+        .header("x-file-name", metadata.filename)
+        .header("x-file-size", metadata.file_size)
+        .header("x-file-hash", metadata.file_hash)
+        .body(body)
+        .unwrap())
 }
