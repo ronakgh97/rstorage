@@ -1,0 +1,19 @@
+[package]
+name = "r-storage"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.50.0", features = ["full"]}
+tokio-util = "0.7.18"
+clap = { version = "4.5.60", features = ["derive"] }
+axum = "0.8.8"
+multer = "3.1.0"
+futures = "0.3.32"
+futures-util = "0.3.32"
+anyhow = "1.0.102"
+chrono = "0.4.44"
+serde = { version = "1.0.228", features = ["derive"] }
+dashmap = "6.1.0"
+sha2 = "0.10.9"
+lazy_static = "1.5.0"
