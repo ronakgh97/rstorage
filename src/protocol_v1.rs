@@ -1,6 +1,6 @@
 use crate::{
-    MAX_FILE_SIZE, Metadata, NETWORK_BUFFER_SIZE, ON_GOINGS, debug, error,
-    get_storage_path_blocking, info, trace, warn,
+    MAX_FILE_SIZE, Metadata, NETWORK_BUFFER_SIZE, ON_GOINGS, READ_CHUNK_SIZE, debug, error,
+    file_hasher, get_storage_path_blocking, info, trace, warn,
 };
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -40,6 +40,9 @@ pub fn start_tcp_server(port: u16) -> Result<()> {
                     }
                 });
             }
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                continue;
+            }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(10));
             }
@@ -59,19 +62,20 @@ pub fn start_tcp_server(port: u16) -> Result<()> {
 
 #[inline]
 fn handle_connection(stream: &TcpStream, storage_path: &Path) -> Result<()> {
-    let mut reader = BufReader::with_capacity(NETWORK_BUFFER_SIZE, stream.try_clone()?);
-    let mut writer = BufWriter::with_capacity(NETWORK_BUFFER_SIZE, stream.try_clone()?);
-
+    let start_time = Instant::now();
     stream.set_nonblocking(false)?;
     stream.set_nodelay(true)?;
-    stream.set_read_timeout(Some(Duration::from_millis(10)))?;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+
+    let mut reader = BufReader::with_capacity(NETWORK_BUFFER_SIZE, stream.try_clone()?);
+    let mut writer = BufWriter::with_capacity(NETWORK_BUFFER_SIZE, stream.try_clone()?);
 
     let (command, headers) = read_request(&mut reader)?;
     debug!("Received {} request", command);
 
     match command.as_str() {
         "UPLOAD" => {
-            handle_upload(&mut reader, &mut writer, &headers, storage_path)?;
+            handle_upload(&mut reader, &mut writer, &headers, start_time, storage_path)?;
         }
         "DOWNLOAD" => {
             handle_download(&mut reader, &mut writer, &headers, storage_path)?;
@@ -129,11 +133,14 @@ pub fn write_frame(writer: &mut BufWriter<TcpStream>, data: &[u8]) -> Result<()>
     let len = data.len();
     // 65535 bytes max frame
     if len > u16::MAX as usize {
-        return Err(anyhow::anyhow!("Response too large: {} bytes", len));
+        return Err(anyhow::anyhow!("Too large content: {} bytes", len));
     }
     let len = (len as u16).to_be_bytes();
     writer.write_all(&len)?;
     writer.write_all(data)?;
+
+    writer.flush()?;
+
     Ok(())
 }
 
@@ -163,10 +170,9 @@ fn handle_upload(
     reader: &mut BufReader<TcpStream>,
     writer: &mut BufWriter<TcpStream>,
     headers: &HashMap<String, String>,
+    time_start: Instant,
     storage_path: &Path,
 ) -> Result<()> {
-    let time_start = Instant::now();
-
     let filename = headers
         .get("file-name")
         .ok_or_else(|| anyhow::anyhow!("Missing file-name header"))?
@@ -203,11 +209,11 @@ fn handle_upload(
 
     ON_GOINGS.insert(file_id.clone(), filename.clone());
 
-    let raw_file = File::create(&file_path)?;
-    let mut file = BufWriter::with_capacity(NETWORK_BUFFER_SIZE * 2, raw_file);
+    let file = File::create(&file_path)?;
+    let mut buf_file = BufWriter::with_capacity(NETWORK_BUFFER_SIZE * 2, file);
     let mut hasher = Sha256::new();
     let mut received: u64 = 0;
-    let mut buf = vec![0u8; NETWORK_BUFFER_SIZE];
+    let mut buf = vec![0u8; READ_CHUNK_SIZE];
 
     while received < file_size {
         let to_read = std::cmp::min(buf.len(), (file_size - received) as usize);
@@ -216,11 +222,11 @@ fn handle_upload(
             break;
         }
         hasher.update(&buf[..n]);
-        file.write_all(&buf[..n])?;
+        buf_file.write_all(&buf[..n])?;
         received += n as u64;
     }
 
-    file.flush()?;
+    buf_file.flush()?;
 
     if received != file_size {
         fs::remove_file(&file_path)?;
@@ -249,8 +255,8 @@ fn handle_upload(
     };
 
     // Save metadata
-    let meta_path = storage_path.join(format!("{}.meta", sanitized_id));
-    fs::write(&meta_path, serde_json::to_vec(&metadata)?)?;
+    let metadata_path = storage_path.join(format!("{}.meta", sanitized_id));
+    metadata.save_to_disk(&metadata_path)?;
 
     ON_GOINGS.remove(&file_id);
 
@@ -284,6 +290,7 @@ fn handle_download(
         return Ok(());
     }
 
+    // TODO: Auth
     let _file_key = headers
         .get("file-key")
         .ok_or_else(|| anyhow::anyhow!("Missing file-key header"))?
@@ -303,8 +310,8 @@ fn handle_download(
         return Ok(());
     }
 
-    let meta_content = fs::read_to_string(&meta_path)?;
-    let metadata: Metadata = serde_json::from_str(&meta_content)?;
+    // Read metadata to get filename, file size and hash etc
+    let metadata: Metadata = Metadata::read_from_disk(&meta_path)?;
 
     let filename = metadata.filename;
     let file_size = metadata.file_size;
@@ -322,7 +329,7 @@ fn handle_download(
     write_frame(writer, header.as_bytes())?;
 
     let mut file = File::open(&file_path)?;
-    let mut buf = vec![0u8; NETWORK_BUFFER_SIZE * 2];
+    let mut buf = vec![0u8; NETWORK_BUFFER_SIZE];
 
     loop {
         let n = file.read(&mut buf)?;
@@ -351,22 +358,12 @@ pub async fn upload_client(path: PathBuf, host: &str, port: u16) -> Result<()> {
         .to_string_lossy()
         .to_string();
 
-    let metadata = fs::metadata(&path).context("Failed to read file metadata")?;
-    let file_size = metadata.len();
+    let file_size = {
+        let metadata = fs::metadata(&path).context("Failed to read file metadata")?;
+        metadata.len()
+    };
 
-    let mut file = File::open(&path).context("Failed to open file")?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 32 * 1024];
-
-    loop {
-        let n = file.read(&mut buf).context("Failed to read file")?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-
-    let file_hash = format!("{:x}", hasher.finalize());
+    let file_hash = file_hasher(&path).context("Failed to compute file hash")?;
 
     let file_key: String = {
         print!("Enter file key: ");
@@ -376,7 +373,7 @@ pub async fn upload_client(path: PathBuf, host: &str, port: u16) -> Result<()> {
         file_key.trim().to_string()
     };
 
-    println!("Starting TCP upload: {} ({} bytes)", filename, file_size);
+    println!("Starting upload: {} ({} bytes)", filename, file_size);
 
     let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
     stream.set_nodelay(true)?;
@@ -386,13 +383,22 @@ pub async fn upload_client(path: PathBuf, host: &str, port: u16) -> Result<()> {
         filename, file_size, file_hash, file_key
     );
 
+    let progress_bar = indicatif::ProgressBar::new(file_size);
+    progress_bar.set_style(
+        indicatif::ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
+            .progress_chars("#>-"),
+    );
+
+    // Send header with 2-byte length prefix
     let len = (request.len() as u16).to_be_bytes();
     stream.write_all(&len).await?;
     stream.write_all(request.as_bytes()).await?;
 
     let mut file = File::open(path).context("Failed to reopen file")?;
-    let mut buf = vec![0u8; NETWORK_BUFFER_SIZE];
+    let mut buf = vec![0u8; READ_CHUNK_SIZE];
 
+    // Buffer here is controlled by tokio's internal buffering, so we can just write as we read
     loop {
         let n = file.read(&mut buf).context("Failed to read file")?;
         if n == 0 {
@@ -402,7 +408,11 @@ pub async fn upload_client(path: PathBuf, host: &str, port: u16) -> Result<()> {
             .write_all(&buf[..n])
             .await
             .context("Failed to send file data")?;
+
+        progress_bar.inc(n as u64);
     }
+
+    progress_bar.finish_and_clear();
 
     stream.flush().await.context("Failed to flush")?;
 
@@ -502,12 +512,19 @@ pub async fn download_client(
 
     println!("Downloading: {} ({} bytes)", filename, file_size);
 
+    let progress_bar = indicatif::ProgressBar::new(file_size);
+    progress_bar.set_style(
+        indicatif::ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
+            .progress_chars("#>-"),
+    );
+
     let output_path = output.unwrap_or_else(|| PathBuf::from(".")).join(&filename);
 
     let raw_file = File::create(&output_path)?;
     let mut output_file = BufWriter::with_capacity(NETWORK_BUFFER_SIZE * 2, raw_file);
     let mut received: u64 = 0;
-    let mut buf = vec![0u8; NETWORK_BUFFER_SIZE];
+    let mut buf = vec![0u8; READ_CHUNK_SIZE * 2];
 
     while received < file_size {
         let to_read = std::cmp::min(buf.len(), (file_size - received) as usize);
@@ -520,23 +537,15 @@ pub async fn download_client(
         }
         output_file.write_all(&buf[..n])?;
         received += n as u64;
+        progress_bar.inc(to_read as u64);
     }
 
     output_file.flush()?;
 
-    let mut file = File::open(&output_path)?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 64 * 1024];
+    progress_bar.finish_and_clear();
 
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
+    let computed_hash = file_hasher(&output_path).context("Failed to compute file hash")?;
 
-    let computed_hash = format!("{:x}", hasher.finalize());
     if computed_hash != file_hash {
         fs::remove_file(&output_path).ok();
         anyhow::bail!(
