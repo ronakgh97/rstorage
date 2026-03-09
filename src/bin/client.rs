@@ -22,6 +22,11 @@ async fn main() -> Result<()> {
             port,
             protocol,
         }) => {
+            if !file.exists() {
+                eprintln!("File not found: {}", file.display());
+                std::process::exit(1);
+            }
+
             let port: u16 = port.parse().unwrap_or(3000);
             if let Some(protocol) = protocol {
                 match protocol.as_str() {
@@ -41,6 +46,21 @@ async fn main() -> Result<()> {
             port,
             protocol,
         }) => {
+            if output.is_some() && output.as_ref().unwrap().exists() {
+                print!("File already exists. Do you want to overwrite it? (y/n): ");
+                let choice: String = {
+                    io::Write::flush(&mut io::stdout())?;
+                    let mut input = String::new();
+                    io::stdin().read_line(&mut input)?;
+                    input.trim().to_lowercase()
+                };
+
+                if choice != "y" {
+                    println!("Aborted");
+                    std::process::exit(0);
+                }
+            }
+
             let port: u16 = port.parse().unwrap_or(3000);
 
             print!("Enter file ID: ");

@@ -51,3 +51,7 @@ pub fn try_get_uptime_hrs() -> f64 {
 lazy_static! {
     pub static ref ON_GOINGS: DashMap<String, String> = DashMap::new();
 }
+
+const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024 * 1024;
+
+const NETWORK_BUFFER_SIZE: usize = 4 * 1024 * 1024;

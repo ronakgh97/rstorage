@@ -35,3 +35,6 @@ TODO
 - Uhm...what else?
 - Fix and improve the buffering and streaming for large files
 - More protocol features like file listing, metadata retrieval, more commands etc.
+- Graceful shutdown and cleanup
+
+There is a RACE CONDITION

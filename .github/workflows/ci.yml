@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [ main, master ]
   pull_request:
-    branches: [main, master]
+    branches: [ main, master ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -48,4 +48,4 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run tests
-        run: cargo nextest run --test test_concurrency
+        run: cargo nextest run --test test_protocol

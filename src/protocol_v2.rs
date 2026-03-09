@@ -1,6 +1,6 @@
 use crate::{
-    Metadata, ON_GOINGS, START_TIME, debug, error, get_storage_path_blocking, info, trace,
-    try_get_uptime_hrs, warn,
+    MAX_FILE_SIZE, Metadata, ON_GOINGS, START_TIME, debug, error, get_storage_path_blocking, info,
+    trace, try_get_uptime_hrs, warn,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -177,6 +177,13 @@ fn handle_server_upload(
         .get("file-size")
         .and_then(|v| v.parse().ok())
         .ok_or_else(|| anyhow::anyhow!("Missing or invalid file-size header"))?;
+
+    if file_size > MAX_FILE_SIZE {
+        warn!("File size {} exceeds 10GB limit", file_size);
+        send_error(socket, 413, "File size exceeds 10GB limit")?;
+        return Ok(());
+    }
+
     let file_hash_expected = headers
         .get("file-hash")
         .ok_or_else(|| anyhow::anyhow!("Missing file-hash header"))?;
@@ -206,7 +213,7 @@ fn handle_server_upload(
 
     // Create file and read data
     let raw_file = fs::File::create(&file_path)?;
-    let mut file = BufWriter::with_capacity(NETWORK_BUFFER_SIZE, raw_file);
+    let mut file = BufWriter::with_capacity(NETWORK_BUFFER_SIZE * 2, raw_file);
     let mut hasher = Sha256::new();
     let mut received: u64 = 0;
     let mut buf = vec![0u8; NETWORK_BUFFER_SIZE];
@@ -324,8 +331,8 @@ fn handle_server_download(socket: &mut TcpStream, headers: &HashMap<String, Stri
 
     // Stream file
     let mut file = fs::File::open(&file_path)?;
+    let mut writer = BufWriter::with_capacity(NETWORK_BUFFER_SIZE * 2, socket.try_clone()?);
     let mut buf = vec![0u8; NETWORK_BUFFER_SIZE];
-    let mut writer = BufWriter::with_capacity(NETWORK_BUFFER_SIZE, socket.try_clone()?);
     loop {
         let n = file.read(&mut buf)?;
         if n == 0 {
@@ -403,7 +410,8 @@ pub async fn upload_client(file_path: PathBuf, host: &str, port: u16) -> Result<
     // Stream file
     let file = fs::File::open(&file_path).context("Failed to reopen file")?;
 
-    let mut file = io::BufReader::with_capacity(4 * 1024 * 1024, file);
+    let mut file = io::BufReader::with_capacity(NETWORK_BUFFER_SIZE * 2, file);
+    let mut buf = vec![0u8; NETWORK_BUFFER_SIZE];
 
     loop {
         let n = file.read(&mut buf).context("Failed to read file")?;
@@ -528,10 +536,10 @@ pub async fn download_client(
 
     let file = fs::File::create(&output).context("Failed to create output file")?;
 
-    let mut file = BufWriter::with_capacity(4 * 1024 * 1024, file);
+    let mut file = BufWriter::with_capacity(NETWORK_BUFFER_SIZE * 2, file);
 
     let mut received: u64 = 0;
-    let mut buf = vec![0u8; 32 * 1024];
+    let mut buf = vec![0u8; NETWORK_BUFFER_SIZE];
 
     while received < file_size {
         let to_read = std::cmp::min(buf.len(), (file_size - received) as usize);

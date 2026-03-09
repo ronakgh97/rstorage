@@ -186,18 +186,18 @@ fn start_server_v1(port: u16) {
     thread::sleep(Duration::from_millis(100));
 }
 
-/// 4-byte BE length prefix + payload
+/// 2-byte BE length prefix + payload
 fn write_frame(stream: &mut TcpStream, data: &[u8]) {
-    let len = (data.len() as u32).to_be_bytes();
+    let len = (data.len() as u16).to_be_bytes();
     stream.write_all(&len).unwrap();
     stream.write_all(data).unwrap();
 }
 
-/// 4-byte BE length prefix + payload
+/// 2-byte BE length prefix + payload
 fn read_frame(stream: &mut TcpStream) -> Vec<u8> {
-    let mut len_buf = [0u8; 4];
+    let mut len_buf = [0u8; 2];
     stream.read_exact(&mut len_buf).unwrap();
-    let len = u32::from_be_bytes(len_buf) as usize;
+    let len = u16::from_be_bytes(len_buf) as usize;
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).unwrap();
     buf
