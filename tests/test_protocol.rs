@@ -171,6 +171,8 @@ fn test_concurrency() {
     for handle in handles {
         handle.join().expect("Client thread panicked!");
     }
+
+    std::fs::remove_dir_all(get_storage_path_blocking().unwrap()).unwrap();
 }
 
 // --- protocol_v1 ----
@@ -320,4 +322,6 @@ fn test_concurrency_v1() {
     for handle in handles {
         handle.join().expect("v1 client thread panicked!");
     }
+
+    std::fs::remove_dir_all(get_storage_path_blocking().unwrap()).unwrap();
 }

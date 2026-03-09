@@ -21,7 +21,7 @@ pub enum ServerCommands {
         #[arg(short, long)]
         port: Option<u16>,
 
-        /// Protocol version: v1 (HTTP) or v2 (Custom TCP)
+        /// Protocol version: v1 (UDP) or v2 (Custom TCP)
         #[arg(long, default_value = "v2")]
         protocol: String,
     },
@@ -29,9 +29,9 @@ pub enum ServerCommands {
 
 #[derive(Parser)]
 #[command(
-    name = "r-storage",
+    name = "r-storage-cli",
     version = "1.0.0-gamma",
-    about = "RStorage: a super ultra blazingly fast file-storage and sharing with very simple protocol",
+    about = "RStorage: a super smol and minimal cli client wrapper for interacting with the r-storage server",
     long_about = ""
 )]
 pub struct ClientArgs {
@@ -51,7 +51,7 @@ pub enum ClientCommands {
         #[arg(short, long)]
         port: String,
 
-        /// Protocol version: v1 (HTTP) or v2 (Custom TCP)
+        /// Protocol version: v1 or v2 (Custom TCP)
         #[arg(long)]
         protocol: Option<String>,
     },
@@ -66,7 +66,7 @@ pub enum ClientCommands {
         #[arg(short, long)]
         port: String,
 
-        /// Protocol version: v1 (HTTP) or v2 (Custom TCP)
+        /// Protocol version: v1 or v2 (Custom TCP)
         #[arg(long)]
         protocol: Option<String>,
     },

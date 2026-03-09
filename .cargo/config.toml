@@ -1,0 +1,6 @@
+[alias]
+lint = "clippy --release --all-targets"
+fix = "clippy --release --all-targets --fix"
+fm = "fmt --all"
+ch = "check --release --all-targets"
+tp = "nextest --test test_protocol --release --all-targets"
