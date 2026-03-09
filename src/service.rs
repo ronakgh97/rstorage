@@ -8,6 +8,9 @@ use std::path::PathBuf;
 pub async fn serve_tcp_v1(port: Option<u16>) -> Result<()> {
     dotenv::dotenv().ok();
 
+    // TODO: use master key for encryption/decryption of file keys and metadata
+    let _master_key = std::env::var("MASTER_KEY").unwrap_or_else(|_| crate::generate_master_key());
+
     let port = port.unwrap_or_else(|| {
         if let Ok(env_port) = std::env::var("R_STORAGE_PORT") {
             env_port.parse::<u16>().unwrap_or(3000)
