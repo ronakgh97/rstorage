@@ -9,7 +9,8 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{self, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 use uuid::Uuid;
@@ -19,23 +20,29 @@ pub fn start_tcp_server(port: u16) -> Result<()> {
 
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port))?;
     listener.set_nonblocking(true)?;
-    info!("Server listening on 0.0.0.0:{}", port);
 
+    let storage_path = get_storage_path_blocking()?;
+    let storage_path = Arc::new(storage_path);
+
+    info!("Server listening on 0.0.0.0:{}", port);
     START_TIME.get_or_init(|| now);
 
     loop {
         match listener.accept() {
             Ok((mut socket, addr)) => {
+                let storage_path = Arc::clone(&storage_path);
                 info!("Connection request from {:?}", addr);
                 socket.set_nonblocking(false)?;
-                thread::spawn(move || match handle_raw_connection(&mut socket) {
-                    Ok(_) => trace!(
-                        "{:?} spawned for connection from {:?}",
-                        thread::current().id(),
-                        addr
-                    ),
-                    Err(e) => error!("Error handling connection from {:?}: {}", addr, e),
-                });
+                thread::spawn(
+                    move || match handle_raw_connection(&mut socket, &storage_path) {
+                        Ok(_) => trace!(
+                            "{:?} spawned for connection from {:?}",
+                            thread::current().id(),
+                            addr
+                        ),
+                        Err(e) => error!("Error handling connection from {:?}: {}", addr, e),
+                    },
+                );
             }
             Err(e) if e.kind() == io::ErrorKind::TimedOut => {
                 continue;
@@ -60,7 +67,7 @@ pub fn start_tcp_server(port: u16) -> Result<()> {
 }
 
 #[inline]
-fn handle_raw_connection(socket: &mut TcpStream) -> Result<()> {
+fn handle_raw_connection(socket: &mut TcpStream, storage_path: &Path) -> Result<()> {
     let time_start = Instant::now();
 
     socket.set_nodelay(true)?;
@@ -68,16 +75,23 @@ fn handle_raw_connection(socket: &mut TcpStream) -> Result<()> {
 
     // Read command line
     let mut command_line = String::new();
+    let mut buf = [0u8; 4096];
+    let mut buf_pos = 0;
+    let mut buf_len = 0;
     loop {
-        let mut buf = [0u8; 1];
-        let n = socket.read(&mut buf)?;
-        if n == 0 {
-            return Ok(());
+        if buf_pos >= buf_len {
+            buf_len = socket.read(&mut buf)?;
+            buf_pos = 0;
+            if buf_len == 0 {
+                return Ok(());
+            }
         }
-        if buf[0] == b'\n' {
+        let byte = buf[buf_pos];
+        buf_pos += 1;
+        if byte == b'\n' {
             break;
         }
-        command_line.push(buf[0] as char);
+        command_line.push(byte as char);
     }
     let command = command_line.trim().to_string();
     debug!("Received {} request", command);
@@ -87,15 +101,21 @@ fn handle_raw_connection(socket: &mut TcpStream) -> Result<()> {
     loop {
         let mut line = String::new();
         loop {
-            let mut buf = [0u8; 1];
-            let n = socket.read(&mut buf)?;
-            if n == 0 {
-                return Ok(());
+            if buf_pos >= buf_len {
+                // less syscalls
+                buf_len = socket.read(&mut buf)?;
+                buf_pos = 0;
+                if buf_len == 0 {
+                    return Ok(());
+                }
             }
-            if buf[0] == b'\n' {
+            // Process byte by byte to find \n
+            let byte = buf[buf_pos];
+            buf_pos += 1;
+            if byte == b'\n' {
                 break;
             }
-            line.push(buf[0] as char);
+            line.push(byte as char);
         }
         let line = line.trim_end();
         if line.is_empty() {
@@ -111,10 +131,10 @@ fn handle_raw_connection(socket: &mut TcpStream) -> Result<()> {
 
     match command.as_str() {
         "UPLOAD" => {
-            handle_server_upload(socket, &headers, time_start)?;
+            handle_server_upload(socket, &headers, time_start, storage_path)?;
         }
         "DOWNLOAD" => {
-            handle_server_download(socket, &headers)?;
+            handle_server_download(socket, &headers, storage_path)?;
         }
         "STATUS" => {
             let ongoing = ON_GOINGS.len();
@@ -174,6 +194,7 @@ fn handle_server_upload(
     socket: &mut TcpStream,
     headers: &HashMap<String, String>,
     time_start: Instant,
+    storage_path: &Path,
 ) -> Result<()> {
     let filename = headers
         .get("file-name")
@@ -203,7 +224,6 @@ fn handle_server_upload(
         .replace(".", "_")
         .replace("\\", "_");
 
-    let storage_path = get_storage_path_blocking()?;
     let file_path = storage_path.join(&sanitized_id);
 
     info!(
@@ -283,7 +303,11 @@ fn handle_server_upload(
     Ok(())
 }
 
-fn handle_server_download(socket: &mut TcpStream, headers: &HashMap<String, String>) -> Result<()> {
+fn handle_server_download(
+    socket: &mut TcpStream,
+    headers: &HashMap<String, String>,
+    storage_path: &Path,
+) -> Result<()> {
     let file_id = headers
         .get("file-id")
         .ok_or_else(|| anyhow::anyhow!("Missing file-id header"))?;
@@ -310,8 +334,6 @@ fn handle_server_download(socket: &mut TcpStream, headers: &HashMap<String, Stri
         .replace("/", "_")
         .replace(".", "_")
         .replace("\\", "_");
-
-    let storage_path = get_storage_path_blocking()?;
 
     let file_path = storage_path.join(&sanitized_id);
     let metadata_path = storage_path.join(format!("{}.meta", sanitized_id));
@@ -444,14 +466,23 @@ pub async fn upload_client(file_path: PathBuf, host: &str, port: u16) -> Result<
     // Read response
     let mut response = String::new();
     let mut prev_char = b'\0';
-    let mut buf = [0u8; 1];
+    let mut buf = [0u8; 4096];
 
-    while let Ok(1) = stream.read(&mut buf) {
-        response.push(buf[0] as char);
-        if prev_char == b'\n' && buf[0] == b'\n' {
+    loop {
+        let n = stream.read(&mut buf)?;
+        if n == 0 {
             break;
         }
-        prev_char = buf[0];
+        for &byte in &buf[..n] {
+            response.push(byte as char);
+            if prev_char == b'\n' && byte == b'\n' {
+                break;
+            }
+            prev_char = byte;
+        }
+        if response.ends_with("\n\n") {
+            break;
+        }
     }
 
     if !response.starts_with("OK\n") {
@@ -502,14 +533,23 @@ pub async fn download_client(
     // Read headers until \n\n
     let mut headers = String::new();
     let mut prev_char = b'\0';
-    let mut buf = [0u8; 1];
+    let mut buf = [0u8; 4096]; // less syscalls
 
-    while let Ok(1) = stream.read(&mut buf) {
-        headers.push(buf[0] as char);
-        if prev_char == b'\n' && buf[0] == b'\n' {
+    loop {
+        let n = stream.read(&mut buf)?;
+        if n == 0 {
             break;
         }
-        prev_char = buf[0];
+        for &byte in &buf[..n] {
+            headers.push(byte as char);
+            if prev_char == b'\n' && byte == b'\n' {
+                break;
+            }
+            prev_char = byte;
+        }
+        if headers.ends_with("\n\n") {
+            break;
+        }
     }
 
     // Check for ERROR

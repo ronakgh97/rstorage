@@ -36,5 +36,7 @@ TODO
 - Fix and improve the buffering and streaming for large files
 - More protocol features like file listing, metadata retrieval, more commands etc.
 - Graceful shutdown and cleanup
+- Little bit client polish
+- Protocol v1 meant to be use UDP, but skill issues...
 
 There is a RACE CONDITION
