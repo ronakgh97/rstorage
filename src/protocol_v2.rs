@@ -4,6 +4,7 @@ use crate::{
 };
 use anyhow::Context;
 use anyhow::Result;
+use colored::Colorize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{self, BufWriter, Read, Write};
@@ -16,11 +17,11 @@ use uuid::Uuid;
 pub fn start_tcp_server(port: u16) -> Result<()> {
     let now = chrono::Local::now();
 
-    START_TIME.get_or_init(|| now);
-
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port))?;
     listener.set_nonblocking(true)?;
     info!("Server listening on 0.0.0.0:{}", port);
+
+    START_TIME.get_or_init(|| now);
 
     loop {
         match listener.accept() {
@@ -154,6 +155,9 @@ fn send_status(socket: &mut TcpStream, code: u16, no_going_tasks: usize) -> Resu
         code, no_going_tasks, uptime_hrs
     );
     socket.write_all(response.as_bytes())?;
+
+    socket.flush()?;
+
     socket.shutdown(std::net::Shutdown::Write)?;
     Ok(())
 }
@@ -185,7 +189,7 @@ fn handle_server_upload(
         return Ok(());
     }
 
-    let file_hash_expected = headers
+    let file_hash = headers
         .get("file-hash")
         .ok_or_else(|| anyhow::anyhow!("Missing file-hash header"))?;
     let file_key = headers
@@ -206,7 +210,7 @@ fn handle_server_upload(
         "Start Uploading: {} ({} bytes) - Hash: {}",
         filename,
         file_size,
-        file_hash_expected.dimmed()
+        file_hash.dimmed()
     );
 
     // Mark as ongoing upload
@@ -214,7 +218,7 @@ fn handle_server_upload(
 
     // Create file and read data
     let raw_file = fs::File::create(&file_path)?;
-    let mut file = BufWriter::with_capacity(NETWORK_BUFFER_SIZE, raw_file);
+    let mut file = BufWriter::with_capacity(NETWORK_BUFFER_SIZE * 3, raw_file);
     let mut hasher = Sha256::new();
     let mut received: u64 = 0;
     let mut buf = vec![0u8; READ_CHUNK_SIZE * 4];
@@ -244,11 +248,11 @@ fn handle_server_upload(
     }
 
     let computed_hash = format!("{:x}", hasher.finalize());
-    if computed_hash != *file_hash_expected {
+    if computed_hash != *file_hash {
         fs::remove_file(&file_path)?;
         warn!(
             "Hash mismatch: expected {} but computed {}",
-            file_hash_expected, computed_hash
+            file_hash, computed_hash
         );
         ON_GOINGS.remove(&file_id);
         send_error(socket, 406, "Hash mismatch")?;
@@ -297,7 +301,7 @@ fn handle_server_download(socket: &mut TcpStream, headers: &HashMap<String, Stri
         return Ok(());
     }
 
-    let _file_key = headers
+    let file_key = headers
         .get("file-key")
         .ok_or_else(|| anyhow::anyhow!("Missing file-key header"))?;
 
@@ -308,15 +312,33 @@ fn handle_server_download(socket: &mut TcpStream, headers: &HashMap<String, Stri
         .replace("\\", "_");
 
     let storage_path = get_storage_path_blocking()?;
-    let metadata_path = storage_path.join(format!("{}.meta", sanitized_id));
-    let file_path = storage_path.join(&sanitized_id);
 
-    let metadata: Metadata =
-        Metadata::read_from_disk(&metadata_path).context("Failed to read metadata")?;
+    let file_path = storage_path.join(&sanitized_id);
+    let metadata_path = storage_path.join(format!("{}.meta", sanitized_id));
+
+    if !metadata_path.exists() {
+        warn!("Metadata for file {} not found", file_id);
+        send_error(socket, 404, "File not found")?;
+        return Ok(());
+    }
+
+    let metadata: Metadata = match Metadata::read_from_disk(&metadata_path) {
+        Ok(meta) => meta,
+        Err(e) => {
+            error!("Failed to read metadata for file {}: {}", file_id, e);
+            return send_error(socket, 500, "Failed to read file metadata");
+        }
+    };
 
     let filename = metadata.filename;
     let file_size = metadata.file_size;
     let file_hash = metadata.file_hash;
+
+    if metadata.file_key != *file_key {
+        warn!("Invalid file key for file {}", file_id);
+        send_error(socket, 403, "Invalid file key")?;
+        return Ok(());
+    }
 
     info!(
         "Downloading: {} ({} bytes) - file_id: {}",
@@ -369,9 +391,11 @@ pub async fn upload_client(file_path: PathBuf, host: &str, port: u16) -> Result<
         file_key.trim().to_string()
     };
 
+    println!("↪ Starting upload: {} ({} bytes)", filename, file_size);
+
     // Compute file hash (CPU-bound, so do it before connecting to server)
     let file_hash = file_hasher(&file_path).context("Failed to compute file hash")?;
-    println!("Computed hash: {}", file_hash);
+    println!("↪ File hash: {}...", file_hash[..8].to_string().dimmed());
 
     let progressbar = indicatif::ProgressBar::new(file_size);
     progressbar.set_style(
@@ -448,9 +472,10 @@ pub async fn upload_client(file_path: PathBuf, host: &str, port: u16) -> Result<
     }
 
     println!(
-        "Upload successful! File ID: {} (took: {}s)",
+        "Upload complete. File ID: {}. Time took: {}",
         file_id, time_took
     );
+
     Ok(file_id)
 }
 
@@ -509,12 +534,12 @@ pub async fn download_client(
         }
     }
 
-    println!("Downloading: {} ({} bytes)", filename, file_size);
+    println!("↩ Downloading: {} ({} bytes)", filename, file_size);
 
     let progressbar = indicatif::ProgressBar::new(file_size);
     progressbar.set_style(
         indicatif::ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:40.cyan/magenta}] {bytes}/{total_bytes} ({eta})")?
+            .template("↩ [{bar:40.cyan/magenta}] {bytes}/{total_bytes} ({eta})")?
             .progress_chars("#>-"),
     );
 
@@ -553,12 +578,12 @@ pub async fn download_client(
     if computed_hash != file_hash {
         fs::remove_file(&output).ok();
         anyhow::bail!(
-            "Hash mismatch: expected {} but computed {}",
+            "✗ Hash mismatch: expected {} but computed {}",
             file_hash,
             computed_hash
         );
     }
 
-    println!("Download successful! Saved to: {}", output.display());
+    println!("Download successful. Saved to: {}", output.display());
     Ok(output)
 }

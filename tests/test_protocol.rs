@@ -6,7 +6,7 @@ use std::net::TcpStream;
 use std::thread;
 use std::time::Duration;
 
-pub const GARBAGE_SIZE: u32 = 256 * 1024 * 1024;
+pub const GARBAGE_SIZE: u32 = 64 * 1024 * 1024;
 
 #[inline]
 fn get_random_bytes(size: u32) -> Vec<u8> {
@@ -24,11 +24,11 @@ fn free_port() -> u16 {
 }
 
 fn start_server(port: u16) {
+    std::fs::create_dir_all(get_storage_path_blocking().unwrap()).unwrap();
+
     thread::spawn(move || {
         r_storage::protocol_v2::start_tcp_server(port).unwrap();
     });
-
-    std::fs::create_dir_all(get_storage_path_blocking().unwrap()).unwrap();
 
     thread::sleep(Duration::from_millis(100));
 }
@@ -173,16 +173,18 @@ fn test_concurrency() {
     }
 
     std::fs::remove_dir_all(get_storage_path_blocking().unwrap()).unwrap();
+    thread::sleep(Duration::from_millis(100));
 }
 
 // --- protocol_v1 ----
 
 fn start_server_v1(port: u16) {
+    std::fs::create_dir_all(get_storage_path_blocking().unwrap()).unwrap();
+
     thread::spawn(move || {
         r_storage::protocol_v1::start_tcp_server(port).unwrap();
     });
 
-    std::fs::create_dir_all(get_storage_path_blocking().unwrap()).unwrap();
     thread::sleep(Duration::from_millis(100));
 }
 
@@ -324,4 +326,6 @@ fn test_concurrency_v1() {
     }
 
     std::fs::remove_dir_all(get_storage_path_blocking().unwrap()).unwrap();
+
+    thread::sleep(Duration::from_millis(100));
 }

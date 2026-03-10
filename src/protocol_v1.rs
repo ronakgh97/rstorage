@@ -1,8 +1,9 @@
 use crate::{
-    MAX_FILE_SIZE, Metadata, NETWORK_BUFFER_SIZE, ON_GOINGS, READ_CHUNK_SIZE, debug, error,
-    file_hasher, get_storage_path_blocking, info, trace, warn,
+    MAX_FILE_SIZE, Metadata, NETWORK_BUFFER_SIZE, ON_GOINGS, READ_CHUNK_SIZE, START_TIME, debug,
+    error, file_hasher, get_storage_path_blocking, info, trace, warn,
 };
 use anyhow::{Context, Result};
+use colored::Colorize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -15,15 +16,15 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 pub fn start_tcp_server(port: u16) -> Result<()> {
+    let now = chrono::Local::now();
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port))?;
     listener.set_nonblocking(true)?;
 
     let storage_path = get_storage_path_blocking()?;
-
-    info!("TCP Server (v1 protocol) listening on 0.0.0.0:{}", port);
-
     let storage_path = Arc::new(storage_path);
 
+    info!("TCP Server (v1 protocol) listening on 0.0.0.0:{}", port);
+    START_TIME.get_or_init(|| now);
     loop {
         match listener.accept() {
             Ok((stream, addr)) => {
@@ -290,8 +291,7 @@ fn handle_download(
         return Ok(());
     }
 
-    // TODO: Auth
-    let _file_key = headers
+    let file_key = headers
         .get("file-key")
         .ok_or_else(|| anyhow::anyhow!("Missing file-key header"))?
         .clone();
@@ -302,20 +302,34 @@ fn handle_download(
         .replace(".", "_")
         .replace("\\", "_");
 
-    let meta_path = storage_path.join(format!("{}.meta", sanitized_id));
     let file_path = storage_path.join(&sanitized_id);
 
+    let meta_path = storage_path.join(format!("{}.meta", sanitized_id));
+
     if !meta_path.exists() {
+        warn!("Metadata not found for file_id: {}", file_id);
         send_error(writer, 404, "File not found")?;
         return Ok(());
     }
 
     // Read metadata to get filename, file size and hash etc
-    let metadata: Metadata = Metadata::read_from_disk(&meta_path)?;
+    let metadata: Metadata = match Metadata::read_from_disk(&meta_path) {
+        Ok(meta) => meta,
+        Err(e) => {
+            error!("Failed to read metadata for file {}: {}", file_id, e);
+            return send_error(writer, 500, "Failed to read file metadata");
+        }
+    };
 
     let filename = metadata.filename;
     let file_size = metadata.file_size;
     let file_hash = metadata.file_hash;
+
+    if metadata.file_key != file_key {
+        warn!("Invalid file key for file_id: {}", file_id);
+        send_error(writer, 403, "Invalid file key")?;
+        return Ok(());
+    }
 
     info!(
         "Downloading: {} ({} bytes) - file_id: {}",
@@ -349,8 +363,8 @@ fn handle_download(
 }
 
 pub async fn upload_client(path: PathBuf, host: &str, port: u16) -> Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
+    // use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // use tokio::net::TcpStream;
 
     let filename = path
         .file_name()
@@ -363,8 +377,6 @@ pub async fn upload_client(path: PathBuf, host: &str, port: u16) -> Result<()> {
         metadata.len()
     };
 
-    let file_hash = file_hasher(&path).context("Failed to compute file hash")?;
-
     let file_key: String = {
         print!("Enter file key: ");
         Write::flush(&mut io::stdout())?;
@@ -373,10 +385,14 @@ pub async fn upload_client(path: PathBuf, host: &str, port: u16) -> Result<()> {
         file_key.trim().to_string()
     };
 
-    println!("Starting upload: {} ({} bytes)", filename, file_size);
+    println!("↪ Starting upload: {} ({} bytes)", filename, file_size);
 
-    let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
+    let file_hash = file_hasher(&path).context("Failed to compute file hash")?;
+    println!("↪ File hash: {}...", file_hash[..8].to_string().dimmed());
+
+    let mut stream = TcpStream::connect(format!("{}:{}", host, port))?;
     stream.set_nodelay(true)?;
+    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
 
     let request = format!(
         "UPLOAD\nfile-name: {}\nfile-size: {}\nfile-hash: {}\nfile-key: {}\n",
@@ -386,27 +402,29 @@ pub async fn upload_client(path: PathBuf, host: &str, port: u16) -> Result<()> {
     let progress_bar = indicatif::ProgressBar::new(file_size);
     progress_bar.set_style(
         indicatif::ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
+            .template("{spinner:.green} [{bar:60.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
             .progress_chars("#>-"),
     );
 
     // Send header with 2-byte length prefix
     let len = (request.len() as u16).to_be_bytes();
-    stream.write_all(&len).await?;
-    stream.write_all(request.as_bytes()).await?;
+    stream.write_all(&len)?;
+    stream.write_all(request.as_bytes())?;
 
-    let mut file = File::open(path).context("Failed to reopen file")?;
+    let file = File::open(path).context("Failed to reopen file")?;
+
+    let mut buf_file = BufReader::with_capacity(NETWORK_BUFFER_SIZE * 2, file);
+
     let mut buf = vec![0u8; READ_CHUNK_SIZE];
 
     // Buffer here is controlled by tokio's internal buffering, so we can just write as we read
     loop {
-        let n = file.read(&mut buf).context("Failed to read file")?;
+        let n = buf_file.read(&mut buf).context("Failed to read file")?;
         if n == 0 {
             break;
         }
         stream
             .write_all(&buf[..n])
-            .await
             .context("Failed to send file data")?;
 
         progress_bar.inc(n as u64);
@@ -414,19 +432,17 @@ pub async fn upload_client(path: PathBuf, host: &str, port: u16) -> Result<()> {
 
     progress_bar.finish_and_clear();
 
-    stream.flush().await.context("Failed to flush")?;
+    stream.flush().context("Failed to flush")?;
 
     let mut len_buf = [0u8; 2];
     stream
         .read_exact(&mut len_buf)
-        .await
         .context("Failed to read response length")?;
     let len = u16::from_be_bytes(len_buf) as usize;
 
     let mut response = vec![0u8; len];
     stream
         .read_exact(&mut response)
-        .await
         .context("Failed to read response")?;
 
     let response = String::from_utf8_lossy(&response);
@@ -449,7 +465,7 @@ pub async fn upload_client(path: PathBuf, host: &str, port: u16) -> Result<()> {
     }
 
     println!(
-        "Upload complete! File ID: {} Time took: {}",
+        "Upload complete. File ID: {}. Time took: {}",
         file_id, time_took
     );
 
@@ -463,29 +479,27 @@ pub async fn download_client(
     host: &str,
     port: u16,
 ) -> Result<PathBuf> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
+    // use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // use tokio::net::TcpStream;
 
-    let mut stream = TcpStream::connect(format!("{}:{}", host, port)).await?;
+    let mut stream = TcpStream::connect(format!("{}:{}", host, port))?;
     stream.set_nodelay(true)?;
 
     let request = format!("DOWNLOAD\nfile-id: {}\nfile-key: {}\n", file_id, file_key);
 
     let len = (request.len() as u16).to_be_bytes();
-    stream.write_all(&len).await?;
-    stream.write_all(request.as_bytes()).await?;
+    stream.write_all(&len)?;
+    stream.write_all(request.as_bytes())?;
 
     let mut len_buf = [0u8; 2];
     stream
         .read_exact(&mut len_buf)
-        .await
         .context("Failed to read header length")?;
     let len = u16::from_be_bytes(len_buf) as usize;
 
     let mut header_bytes = vec![0u8; len];
     stream
         .read_exact(&mut header_bytes)
-        .await
         .context("Failed to read header")?;
 
     let header = String::from_utf8_lossy(&header_bytes);
@@ -510,12 +524,12 @@ pub async fn download_client(
         }
     }
 
-    println!("Downloading: {} ({} bytes)", filename, file_size);
+    println!("↩ Downloading: {} ({} bytes)", filename, file_size);
 
     let progress_bar = indicatif::ProgressBar::new(file_size);
     progress_bar.set_style(
         indicatif::ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
+            .template("↩ [{bar:60.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
             .progress_chars("#>-"),
     );
 
@@ -530,7 +544,6 @@ pub async fn download_client(
         let to_read = std::cmp::min(buf.len(), (file_size - received) as usize);
         let n = stream
             .read(&mut buf[..to_read])
-            .await
             .context("Failed to read file data")?;
         if n == 0 {
             break;
@@ -549,12 +562,12 @@ pub async fn download_client(
     if computed_hash != file_hash {
         fs::remove_file(&output_path).ok();
         anyhow::bail!(
-            "Hash mismatch: expected {} but computed {}",
+            "✗ Hash mismatch: expected {} but computed {}",
             file_hash,
             computed_hash
         );
     }
 
-    println!("Download complete! Saved to: {}", output_path.display());
+    println!("Download complete. Saved to: {}", output_path.display());
     Ok(output_path)
 }

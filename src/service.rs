@@ -1,6 +1,6 @@
 use crate::protocol_v1::start_tcp_server;
 use crate::protocol_v2::start_tcp_server as start_tcp_server_v2;
-use crate::{get_storage_path, get_storage_path_blocking};
+use crate::{MASTER_KEY, get_storage_path, get_storage_path_blocking};
 use anyhow::Result;
 use std::fs;
 use std::path::PathBuf;
@@ -8,8 +8,9 @@ use std::path::PathBuf;
 pub async fn serve_tcp_v1(port: Option<u16>) -> Result<()> {
     dotenv::dotenv().ok();
 
-    // TODO: use master key for encryption/decryption of file keys and metadata
-    let _master_key = std::env::var("MASTER_KEY").unwrap_or_else(|_| crate::generate_master_key());
+    let master_key = std::env::var("MASTER_KEY").unwrap_or_else(|_| crate::generate_master_key());
+
+    MASTER_KEY.get_or_init(move || master_key);
 
     let port = port.unwrap_or_else(|| {
         if let Ok(env_port) = std::env::var("R_STORAGE_PORT") {
@@ -35,6 +36,10 @@ pub async fn serve_tcp_v1(port: Option<u16>) -> Result<()> {
 
 pub async fn serve_tcp_v2(port: Option<u16>) -> Result<()> {
     dotenv::dotenv().ok();
+
+    let master_key = std::env::var("MASTER_KEY").unwrap_or_else(|_| crate::generate_master_key());
+
+    MASTER_KEY.get_or_init(move || master_key);
 
     let port = port.unwrap_or_else(|| {
         if let Ok(env_port) = std::env::var("R_STORAGE_PORT") {
