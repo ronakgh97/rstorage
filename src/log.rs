@@ -18,7 +18,7 @@ impl Level {
     fn from_env() -> Self {
         dotenv::dotenv().ok();
 
-        env::var("LOG_lEVEL")
+        env::var("LOG_LEVEL")
             .ok()
             .and_then(|s| match s.to_lowercase().as_str() {
                 "trace" => Some(Level::Trace),

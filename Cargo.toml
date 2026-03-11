@@ -15,6 +15,20 @@ path = "src/bin/client.rs"
 name = "r_storage"
 path = "src/lib.rs"
 
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+incremental = false
+debug = false
+
+[profile.dev]
+opt-level = 1
+debug = true
+incremental = true
+
 [dependencies]
 tokio = { version = "1.50.0", features = ["full"] }
 clap = { version = "4.5.60", features = ["derive"] }

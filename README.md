@@ -1,3 +1,5 @@
+Tweaking with TCP UDP QDP because Im bored and depressed
+
 Im in need of simple storage server, which can be use in CI pipeline and my other projects...
 
 My initial thoughts
@@ -40,3 +42,4 @@ TODO
 - Protocol v1 meant to be use UDP, but skill issues...
 
 There is a RACE CONDITION
+HASH MISMATCH UNDER HIGH LOAD, FUCK

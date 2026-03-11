@@ -137,7 +137,7 @@ fn test_concurrency() {
     let port = free_port();
     start_server(port);
 
-    let num_clients = 12;
+    let num_clients = 32;
     let mut handles = Vec::new();
 
     for i in 0..num_clients {
@@ -291,7 +291,7 @@ fn test_concurrency_v1() {
     let port = free_port();
     start_server_v1(port);
 
-    let num_clients = 12;
+    let num_clients = 32;
     let mut handles = Vec::new();
 
     for i in 0..num_clients {
