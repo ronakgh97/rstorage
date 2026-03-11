@@ -1,6 +1,6 @@
 use crate::{
-    MAX_FILE_SIZE, Metadata, NETWORK_BUFFER_SIZE, ON_GOINGS, READ_CHUNK_SIZE, START_TIME, debug,
-    error, file_hasher, get_storage_path_blocking, info, trace, warn,
+    MAX_FILE_SIZE, Metadata, NETWORK_BUFFER_SIZE, ON_GOINGS, READ_CHUNK_SIZE, SERVER_TRACKER,
+    START_TIME, debug, error, file_hasher, get_storage_path_blocking, info, trace, warn,
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
@@ -38,6 +38,10 @@ pub fn start_tcp_server(port: u16) -> Result<()> {
                     );
                     if let Err(e) = handle_connection(&stream, &storage_path) {
                         error!("Error handling connection from {:?}: {}", addr, e);
+                    } else {
+                        // On successful, increment total connections (TODO: this is a very rough nonsense count)
+                        let mut tracker = SERVER_TRACKER.write().unwrap();
+                        tracker.total_connections += 1;
                     }
                 });
             }
@@ -105,7 +109,7 @@ fn read_request(reader: &mut BufReader<TcpStream>) -> Result<(String, HashMap<St
         .trim()
         .to_string();
 
-    let mut headers = HashMap::new();
+    let mut headers = HashMap::with_capacity(12);
     for line in lines {
         if line.is_empty() {
             break;
@@ -206,7 +210,12 @@ fn handle_upload(
 
     let file_path = storage_path.join(&sanitized_id);
 
-    info!("Uploading: {} ({} MB)", filename, file_size);
+    info!(
+        "Start Uploading: {} ({} bytes) - Hash: {}",
+        filename,
+        file_size,
+        file_hash[..8].dimmed()
+    );
 
     ON_GOINGS.insert(file_id.clone(), filename.clone());
 
@@ -264,10 +273,11 @@ fn handle_upload(
     let time_took = time_start.elapsed().as_secs_f64();
     send_ok_upload(writer, &file_id, &file_key, time_took)?;
 
-    info!(
-        "Upload complete: file-id: {} - file-hash: {}",
-        file_id, computed_hash
-    );
+    info!("Upload complete: File-ID: {}", file_id.dimmed());
+
+    let mut lock = SERVER_TRACKER.write().unwrap();
+    lock.total_bandwidth_gb += file_size as f64 / (1024.0 * 1024.0 * 1024.0);
+
     Ok(())
 }
 
@@ -332,7 +342,7 @@ fn handle_download(
     }
 
     info!(
-        "Downloading: {} ({} bytes) - file_id: {}",
+        "Downloading: {} ({} bytes) - File-ID: {}",
         filename, file_size, file_id
     );
 
@@ -359,6 +369,12 @@ fn handle_download(
     writer.get_ref().shutdown(Shutdown::Write)?;
 
     info!("Download complete: {}", file_id);
+
+    info!("Download complete: File-ID: {}", file_id);
+
+    let mut lock = SERVER_TRACKER.write().unwrap();
+    lock.total_bandwidth_gb += file_size as f64 / (1024.0 * 1024.0 * 1024.0);
+
     Ok(())
 }
 
@@ -417,7 +433,7 @@ pub async fn upload_client(path: PathBuf, host: &str, port: u16) -> Result<()> {
 
     let mut buf = vec![0u8; READ_CHUNK_SIZE];
 
-    // Buffer here is controlled by tokio's internal buffering, so we can just write as we read
+    // Stream file
     loop {
         let n = buf_file.read(&mut buf).context("Failed to read file")?;
         if n == 0 {
@@ -434,6 +450,7 @@ pub async fn upload_client(path: PathBuf, host: &str, port: u16) -> Result<()> {
 
     stream.flush().context("Failed to flush")?;
 
+    // Read response with 2-byte length prefix
     let mut len_buf = [0u8; 2];
     stream
         .read_exact(&mut len_buf)

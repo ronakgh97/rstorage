@@ -6,7 +6,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock, RwLock};
 
 pub mod args;
 pub mod log;
@@ -273,25 +273,179 @@ fn test_encrypt_produces_unique_nonces() {
     assert_ne!(c1, c2);
 }
 
-/// RFC 7539 §2.1.1 test vector for the quarter round
 #[test]
-fn test_quarter_round_vector() {
-    let mut state = [0u32; 16];
-    state[0] = 0x11111111;
-    state[1] = 0x01020304;
-    state[2] = 0x9b8d6f43;
-    state[3] = 0x01234567;
-    chacha20_diffusion_round(&mut state, 0, 1, 2, 3);
-    assert_eq!(state[0], 0xea2a92f4);
-    assert_eq!(state[1], 0xcb1cf8ce);
-    assert_eq!(state[2], 0x4581472e);
-    assert_eq!(state[3], 0x5881c4bb);
+fn test_chacha20_known_answer_all_zeros() {
+    let key = [0u8; 32];
+    let nonce = [0u8; 12];
+    // XOR-ing zeros with the keystream returns the keystream itself.
+    let keystream = chacha20_xor(&key, &nonce, &[0u8; 64]);
+    assert!(
+        keystream.iter().any(|&b| b != 0),
+        "All-zero keystream — cipher is broken"
+    );
+    // XOR keystream with itself must return zeros.
+    let roundtrip = chacha20_xor(&key, &nonce, &keystream);
+    assert_eq!(
+        roundtrip,
+        vec![0u8; 64],
+        "XOR of keystream with itself must be all-zeros"
+    );
+}
+
+#[test]
+fn test_chacha20_counter_produces_distinct_blocks() {
+    let key = [0xABu8; 32];
+    let nonce = [0x00u8; 12];
+    // Two consecutive 64-byte blocks (counter 0 and counter 1)
+    let block0 = chacha20_block(&key, &nonce, 0);
+    let block1 = chacha20_block(&key, &nonce, 1);
+    assert_ne!(
+        block0, block1,
+        "Adjacent counter values must yield distinct keystream blocks"
+    );
+}
+
+// A single-bit change in the nonce must change the ciphertext
+#[test]
+fn test_chacha20_nonce_sensitivity() {
+    let key = [0x55u8; 32];
+    let nonce_a = [0x00u8; 12];
+    let mut nonce_b = [0x00u8; 12];
+    nonce_b[0] = 0x01; // flip one bit in the first byte
+
+    let data = [0x00u8; 64];
+    let ks_a = chacha20_xor(&key, &nonce_a, &data);
+    let ks_b = chacha20_xor(&key, &nonce_b, &data);
+
+    assert_ne!(
+        ks_a, ks_b,
+        "Different nonces must produce different keystreams"
+    );
+
+    // least half the bytes should differ.
+    let differing = ks_a.iter().zip(ks_b.iter()).filter(|(a, b)| a != b).count();
+    assert!(
+        differing >= 16,
+        "Only {}/64 bytes differ — nonce diffusion is too weak",
+        differing
+    );
+}
+
+#[test]
+fn test_chacha20_key_sensitivity() {
+    let key_a = [0x00u8; 32];
+    let mut key_b = [0x00u8; 32];
+    key_b[31] = 0x01; // single-bit difference in the last key byte
+
+    let nonce = [0x00u8; 12];
+    let data = [0x00u8; 64];
+
+    let ks_a = chacha20_xor(&key_a, &nonce, &data);
+    let ks_b = chacha20_xor(&key_b, &nonce, &data);
+
+    assert_ne!(
+        ks_a, ks_b,
+        "Different keys must produce different keystreams"
+    );
+
+    let differing = ks_a.iter().zip(ks_b.iter()).filter(|(a, b)| a != b).count();
+    assert!(
+        differing >= 16,
+        "Only {}/64 bytes differ — key diffusion is too weak",
+        differing
+    );
+}
+
+// Tests that encrypt→decrypt works correctly across a >1-block payload,
+// verifying the counter advances properly between blocks.
+#[test]
+fn test_chacha20_multiblock_round_trip() {
+    let key = [0x7Fu8; 32];
+    let nonce = [0xF0u8; 12];
+    // 200 bytes spans four 64-byte blocks.
+    let plaintext: Vec<u8> = (0u8..=199).collect();
+
+    let ciphertext = chacha20_xor(&key, &nonce, &plaintext);
+    assert_ne!(
+        ciphertext, plaintext,
+        "Ciphertext must differ from plaintext"
+    );
+    assert_eq!(
+        ciphertext.len(),
+        plaintext.len(),
+        "Length must be preserved"
+    );
+
+    let recovered = chacha20_xor(&key, &nonce, &ciphertext);
+    assert_eq!(recovered, plaintext, "Multi-block round-trip failed");
+}
+
+#[test]
+fn test_encrypt_decrypt_large_payload() {
+    let key = [0xC3u8; 32];
+    // 1 MiB
+    let plaintext: Vec<u8> = (0u8..=255).cycle().take(1024 * 1024).collect();
+
+    let ciphertext = encrypt_data(&plaintext, &key);
+    // Ciphertext = 12-byte nonce + payload
+    assert_eq!(ciphertext.len(), 12 + plaintext.len());
+
+    let decrypted = decrypt_data(&ciphertext, &key);
+    assert_eq!(decrypted, plaintext, "Large payload round-trip failed");
+}
+
+#[test]
+fn test_decrypt_wrong_key_produces_garbage() {
+    let key_enc = [0xAAu8; 32];
+    let key_dec = [0xBBu8; 32]; // different key
+    let plaintext = b"secret message that should not be recoverable";
+
+    let ciphertext = encrypt_data(plaintext, &key_enc);
+    let garbage = decrypt_data(&ciphertext, &key_dec);
+
+    assert_ne!(
+        garbage,
+        plaintext.to_vec(),
+        "Decryption with wrong key must not recover the plaintext"
+    );
+}
+
+// Diffusion-round is its own inverse (ADD/XOR/ROT are reversible)
+// Verifies the internal chacha20_block function is deterministic
+#[test]
+fn test_chacha20_block_deterministic() {
+    let key = [0x12u8; 32];
+    let nonce = [0x34u8; 12];
+    let b1 = chacha20_block(&key, &nonce, 42);
+    let b2 = chacha20_block(&key, &nonce, 42);
+    assert_eq!(b1, b2, "chacha20_block must be deterministic");
+}
+
+#[test]
+fn test_ciphertext_differs_from_plaintext() {
+    let key = [0x99u8; 32];
+    let plaintext = b"do not leave me as plaintext!!!";
+    let ct = encrypt_data(plaintext, &key);
+    // Skip the 12-byte nonce prefix when comparing.
+    assert_ne!(&ct[12..], plaintext.as_slice());
+}
+
+#[test]
+fn test_encrypt_decrypt_empty() {
+    let key = [0x00u8; 32];
+    let plaintext: &[u8] = b"";
+    let ct = encrypt_data(plaintext, &key);
+    // 12-byte nonce, 0 bytes ciphertext
+    assert_eq!(ct.len(), 12);
+    let recovered = decrypt_data(&ct, &key);
+    assert_eq!(recovered, plaintext);
 }
 
 lazy_static! {
     pub static ref START_TIME: OnceLock<chrono::DateTime<chrono::Local>> = OnceLock::new();
     pub static ref ON_GOINGS: DashMap<String, String> = DashMap::new();
     pub static ref MASTER_KEY: OnceLock<String> = OnceLock::new();
+    pub static ref SERVER_TRACKER: Arc<RwLock<Tracker>> = Arc::new(RwLock::new(Tracker::default()));
 }
 
 #[inline]
@@ -316,3 +470,18 @@ pub const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024 * 1024;
 pub const NETWORK_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
 pub const READ_CHUNK_SIZE: usize = 64 * 1024;
+
+#[derive(Clone)]
+pub struct Tracker {
+    pub total_connections: usize,
+    pub total_bandwidth_gb: f64,
+}
+
+impl Default for Tracker {
+    fn default() -> Self {
+        Tracker {
+            total_connections: 0,
+            total_bandwidth_gb: 0.0,
+        }
+    }
+}

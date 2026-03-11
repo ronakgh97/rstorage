@@ -37,7 +37,7 @@ file-key: <secret key>
 OK
 file-id: <uuid>
 time-took: <seconds>
-
+\n\n
 ```
 
 #### Response (Error)
@@ -46,7 +46,7 @@ time-took: <seconds>
 ERROR
 code: <http status code>
 message: <error message>
-
+\n\n
 ```
 
 ---
@@ -59,7 +59,7 @@ message: <error message>
 DOWNLOAD
 file-id: <uuid>
 file-key: <secret key>
-
+\n\n
 ```
 
 #### Response
@@ -190,13 +190,6 @@ A lightweight TCP protocol using length-prefixed message framing. Reliable and s
 - Payload contains: command + headers + optional binary data
 - Headers end with single newline
 ```
-
-### Buffer Sizes
-
-| Buffer         | Size | Purpose                      |
-|----------------|------|------------------------------|
-| Network buffer | 4MB  | BufReader/BufWriter capacity |
-| Scratch buffer | 8MB  | File read/write operations   |
 
 ### UPLOAD
 
