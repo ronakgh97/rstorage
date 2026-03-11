@@ -1,4 +1,4 @@
-Tweaking with TCP UDP QDP because Im bored and depressed
+Tweaking with TCP UDP QDP because Im bored
 
 Im in need of simple storage server, which can be use in CI pipeline and my other projects...
 

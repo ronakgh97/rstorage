@@ -3,9 +3,9 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
-    name = "r-storage",
+    name = "r-drive",
     version = "1.0.0-gamma",
-    about = "RStorage: a super ultra blazingly fast file-storage and sharing with very simple protocol",
+    about = "R-Drive: a super ultra blazingly fast file-storage and sharing with very simple protocol",
     long_about = ""
 )]
 pub struct ServerArgs {
@@ -29,9 +29,9 @@ pub enum ServerCommands {
 
 #[derive(Parser)]
 #[command(
-    name = "r-storage-cli",
+    name = "r-drive-cli",
     version = "1.0.0-gamma",
-    about = "RStorage: a super smol and minimal cli client wrapper for interacting with the r-storage server",
+    about = "R-Drive: a super smol and minimal cli client wrapper for interacting with the r-storage server",
     long_about = ""
 )]
 pub struct ClientArgs {
@@ -49,11 +49,15 @@ pub enum ClientCommands {
 
         /// Port to connect to the server (default: 3000)
         #[arg(short, long)]
-        port: String,
+        port: u16,
 
         /// Protocol version: v1 or v2 (Custom TCP)
-        #[arg(long)]
+        #[arg(long, default_value = "v2")]
         protocol: Option<String>,
+
+        /// Lock the file with a key, can be used in CI (default is input prompt)
+        #[arg(long)]
+        file_key: Option<String>,
     },
 
     /// Download a file from the server
@@ -64,10 +68,20 @@ pub enum ClientCommands {
 
         /// Port to connect to the server (default: 3000)
         #[arg(short, long)]
-        port: String,
+        port: u16,
 
         /// Protocol version: v1 or v2 (Custom TCP)
         #[arg(long)]
         protocol: Option<String>,
+
+        /// Lock the file with a key, this arg can be used in CI (default is input prompt)
+        #[arg(long)]
+        file_key: Option<String>,
+
+        /// File ID to download, if not provided, it will be prompted in the terminal
+        #[arg(short, long)]
+        file_id: Option<String>,
     },
+
+    Ls {},
 }

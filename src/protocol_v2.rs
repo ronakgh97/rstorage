@@ -378,7 +378,12 @@ fn handle_server_download(
     Ok(())
 }
 
-pub async fn upload_client(file_path: PathBuf, host: &str, port: u16) -> Result<String> {
+pub async fn upload_client(
+    file_path: PathBuf,
+    lock_key: String,
+    host: &str,
+    port: u16,
+) -> Result<String> {
     let filename = file_path
         .file_name()
         .context("Invalid file path")?
@@ -387,14 +392,6 @@ pub async fn upload_client(file_path: PathBuf, host: &str, port: u16) -> Result<
 
     let metadata = fs::metadata(&file_path).context("Failed to read file metadata")?;
     let file_size = metadata.len();
-
-    let file_key: String = {
-        print!("Enter file key: ");
-        Write::flush(&mut io::stdout())?;
-        let mut file_key = String::new();
-        io::stdin().read_line(&mut file_key)?;
-        file_key.trim().to_string()
-    };
 
     println!("↪ Starting upload: {} ({} bytes)", filename, file_size);
 
@@ -419,7 +416,7 @@ pub async fn upload_client(file_path: PathBuf, host: &str, port: u16) -> Result<
     // Send UPLOAD request
     let request = format!(
         "UPLOAD\nfile-name: {}\nfile-size: {}\nfile-hash: {}\nfile-key: {}\n\n",
-        filename, file_size, file_hash, file_key
+        filename, file_size, file_hash, lock_key
     );
     stream
         .write_all(request.as_bytes())

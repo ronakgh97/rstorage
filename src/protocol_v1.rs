@@ -378,7 +378,12 @@ fn handle_download(
     Ok(())
 }
 
-pub async fn upload_client(path: PathBuf, host: &str, port: u16) -> Result<()> {
+pub async fn upload_client(
+    path: PathBuf,
+    lock_key: String,
+    host: &str,
+    port: u16,
+) -> Result<String> {
     // use tokio::io::{AsyncReadExt, AsyncWriteExt};
     // use tokio::net::TcpStream;
 
@@ -393,14 +398,6 @@ pub async fn upload_client(path: PathBuf, host: &str, port: u16) -> Result<()> {
         metadata.len()
     };
 
-    let file_key: String = {
-        print!("Enter file key: ");
-        Write::flush(&mut io::stdout())?;
-        let mut file_key = String::new();
-        io::stdin().read_line(&mut file_key)?;
-        file_key.trim().to_string()
-    };
-
     println!("↪ Starting upload: {} ({} bytes)", filename, file_size);
 
     let file_hash = file_hasher(&path).context("Failed to compute file hash")?;
@@ -412,7 +409,7 @@ pub async fn upload_client(path: PathBuf, host: &str, port: u16) -> Result<()> {
 
     let request = format!(
         "UPLOAD\nfile-name: {}\nfile-size: {}\nfile-hash: {}\nfile-key: {}\n",
-        filename, file_size, file_hash, file_key
+        filename, file_size, file_hash, lock_key
     );
 
     let progress_bar = indicatif::ProgressBar::new(file_size);
@@ -486,7 +483,7 @@ pub async fn upload_client(path: PathBuf, host: &str, port: u16) -> Result<()> {
         file_id, time_took
     );
 
-    Ok(())
+    Ok(file_id)
 }
 
 pub async fn download_client(

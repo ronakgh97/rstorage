@@ -1,8 +1,9 @@
-use r_storage::get_storage_path_blocking;
+use r_drive::{SERVER_TRACKER, get_storage_path_blocking};
 use rand::RngExt;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -27,7 +28,7 @@ fn start_server(port: u16) {
     std::fs::create_dir_all(get_storage_path_blocking().unwrap()).unwrap();
 
     thread::spawn(move || {
-        r_storage::protocol_v2::start_tcp_server(port).unwrap();
+        r_drive::protocol_v2::start_tcp_server(port).unwrap();
     });
 
     thread::sleep(Duration::from_millis(100));
@@ -182,7 +183,7 @@ fn start_server_v1(port: u16) {
     std::fs::create_dir_all(get_storage_path_blocking().unwrap()).unwrap();
 
     thread::spawn(move || {
-        r_storage::protocol_v1::start_tcp_server(port).unwrap();
+        r_drive::protocol_v1::start_tcp_server(port).unwrap();
     });
 
     thread::sleep(Duration::from_millis(100));
@@ -327,5 +328,157 @@ fn test_concurrency_v1() {
 
     std::fs::remove_dir_all(get_storage_path_blocking().unwrap()).unwrap();
 
+    thread::sleep(Duration::from_millis(100));
+}
+
+fn reset_tracker() {
+    let mut lock = SERVER_TRACKER.write().unwrap();
+    lock.total_connections = 0;
+    lock.total_bandwidth_gb = 0.0;
+}
+
+fn snapshot_tracker() -> (usize, f64) {
+    let lock = SERVER_TRACKER.read().unwrap();
+    (lock.total_connections, lock.total_bandwidth_gb)
+}
+
+/// Verifies that concurrent uploads/downloads from many threads do not corrupt
+#[test]
+fn test_tracker_thread_safety_v2() {
+    const NUM_CLIENTS: usize = 24;
+    const PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
+
+    let port = free_port();
+
+    // Start fresh
+    reset_tracker();
+
+    std::fs::create_dir_all(get_storage_path_blocking().unwrap()).unwrap();
+
+    thread::spawn(move || {
+        r_drive::protocol_v2::start_tcp_server(port).unwrap();
+    });
+    thread::sleep(Duration::from_millis(150));
+
+    // Collect the file_ids so we can issue concurrent downloads after uploads.
+    let file_ids: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    {
+        let mut handles = Vec::new();
+        for i in 0..NUM_CLIENTS {
+            let ids = Arc::clone(&file_ids);
+            let handle = thread::spawn(move || {
+                let payload = get_random_bytes(PAYLOAD_BYTES as u32);
+                let filename = format!("tracker_test_{}.bin", i);
+                let file_key = format!("tracker_key_{}", i);
+
+                let file_id = client_upload(port, &payload, &filename, &file_key);
+
+                // Stash file-id and key
+                ids.lock().unwrap().push((file_id, file_key));
+            });
+            handles.push(handle);
+        }
+        for h in handles {
+            h.join().expect("upload thread panicked");
+        }
+    }
+
+    thread::sleep(Duration::from_millis(100));
+
+    let (conns_after_upload, bw_after_upload) = snapshot_tracker();
+
+    assert_eq!(
+        conns_after_upload, NUM_CLIENTS,
+        "Expected {} tracked connections after {} uploads, got {}",
+        NUM_CLIENTS, NUM_CLIENTS, conns_after_upload
+    );
+
+    let expected_bw = NUM_CLIENTS as f64 * PAYLOAD_BYTES as f64 / (1024.0 * 1024.0 * 1024.0);
+    let bw_diff = (bw_after_upload - expected_bw).abs();
+    assert!(
+        bw_diff < 1e-6,
+        "Bandwidth tracking off: expected ~{:.9} GB, got {:.9} GB (diff {:.9})",
+        expected_bw,
+        bw_after_upload,
+        bw_diff
+    );
+
+    println!(
+        "[tracker test] after {} uploads: connections={}, bandwidth_gb={:.9}",
+        NUM_CLIENTS, conns_after_upload, bw_after_upload
+    );
+
+    {
+        let ids_snapshot: Vec<(String, String)> = file_ids.lock().unwrap().clone();
+        let mut handles = Vec::new();
+        for (file_id, file_key) in ids_snapshot {
+            let handle = thread::spawn(move || {
+                client_download(port, &file_id, &file_key);
+            });
+            handles.push(handle);
+        }
+        for h in handles {
+            h.join().expect("download thread panicked");
+        }
+    }
+
+    thread::sleep(Duration::from_millis(100));
+
+    let (conns_after_download, bw_after_download) = snapshot_tracker();
+
+    assert_eq!(
+        conns_after_download,
+        2 * NUM_CLIENTS,
+        "Expected {} total connections after uploads+downloads, got {}",
+        2 * NUM_CLIENTS,
+        conns_after_download
+    );
+
+    // Downloads should not have changed the bandwidth total since it's only tracking uploads.
+    let bw_diff2 = (bw_after_download - expected_bw).abs();
+    assert!(
+        bw_diff2 < 1e-6,
+        "Bandwidth changed unexpectedly during downloads: {:.9} GB",
+        bw_after_download
+    );
+
+    println!(
+        "[tracker test] after {} downloads: connections={}, bandwidth_gb={:.9}",
+        NUM_CLIENTS, conns_after_download, bw_after_download
+    );
+
+    {
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let handle = thread::spawn(|| {
+                for _ in 0..1_000 {
+                    // Interleave reads and writes as fast as possible.
+                    let _ = snapshot_tracker();
+                    {
+                        let mut lock = SERVER_TRACKER.write().unwrap();
+                        lock.total_connections += 0; // no-op write, just contends the lock
+                    }
+                }
+            });
+            handles.push(handle);
+        }
+        for h in handles {
+            h.join().expect("hammer thread panicked");
+        }
+    }
+
+    // Connections should not have changed (all writes were += 0)
+    let (conns_final, _) = snapshot_tracker();
+    assert_eq!(
+        conns_final,
+        2 * NUM_CLIENTS,
+        "Connections changed unexpectedly during hammer phase: {}",
+        conns_final
+    );
+
+    println!("[tracker test] hammer phase passed, no races detected.");
+
+    std::fs::remove_dir_all(get_storage_path_blocking().unwrap()).unwrap();
     thread::sleep(Duration::from_millis(100));
 }

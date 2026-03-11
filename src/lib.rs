@@ -1,12 +1,12 @@
 use anyhow::Result;
 use dashmap::DashMap;
 use hex::decode;
-use lazy_static::lazy_static;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, LazyLock, OnceLock, RwLock};
 
 pub mod args;
 pub mod log;
@@ -22,12 +22,20 @@ pub async fn get_storage_path() -> Result<PathBuf> {
     Ok(storage_path)
 }
 
-#[inline]
+#[inline(always)]
 pub fn get_storage_path_blocking() -> Result<PathBuf> {
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
     let storage_path = home_dir.join(".r_storage").join("storage");
     Ok(storage_path)
+}
+
+#[inline(always)]
+pub fn get_catalog_path() -> Result<PathBuf> {
+    let home_dir =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    let path = home_dir.join(".r_storage").join("catalog.bin");
+    Ok(path)
 }
 
 #[inline(always)]
@@ -100,6 +108,41 @@ impl Metadata {
         let encrypted = encrypt_data(&serialized, &key_bytes);
 
         std::fs::write(path, encrypted)?;
+        Ok(())
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct Catalog {
+    pub file_map: HashMap<String, String>,
+}
+
+impl Default for Catalog {
+    fn default() -> Self {
+        Catalog::new()
+    }
+}
+
+impl Catalog {
+    pub fn new() -> Self {
+        Catalog {
+            file_map: HashMap::new(),
+        }
+    }
+
+    pub fn read(path: &PathBuf) -> Result<Self> {
+        use postcard::from_bytes;
+
+        let file = std::fs::read(path)?;
+        let catalog = from_bytes(&file)?;
+        Ok(catalog)
+    }
+
+    pub fn write(&mut self, path: &PathBuf) -> Result<()> {
+        use postcard::to_allocvec;
+
+        let bytes = to_allocvec(self)?;
+        std::fs::write(path, bytes)?;
         Ok(())
     }
 }
@@ -441,12 +484,14 @@ fn test_encrypt_decrypt_empty() {
     assert_eq!(recovered, plaintext);
 }
 
-lazy_static! {
-    pub static ref START_TIME: OnceLock<chrono::DateTime<chrono::Local>> = OnceLock::new();
-    pub static ref ON_GOINGS: DashMap<String, String> = DashMap::new();
-    pub static ref MASTER_KEY: OnceLock<String> = OnceLock::new();
-    pub static ref SERVER_TRACKER: Arc<RwLock<Tracker>> = Arc::new(RwLock::new(Tracker::default()));
-}
+pub static START_TIME: OnceLock<chrono::DateTime<chrono::Local>> = OnceLock::new();
+
+pub static ON_GOINGS: LazyLock<DashMap<String, String>> = LazyLock::new(DashMap::new);
+
+pub static MASTER_KEY: OnceLock<String> = OnceLock::new();
+
+pub static SERVER_TRACKER: LazyLock<Arc<RwLock<Tracker>>> =
+    LazyLock::new(|| Arc::new(RwLock::new(Tracker::default())));
 
 #[inline]
 /// Get the server uptime in hours

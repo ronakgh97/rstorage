@@ -1,9 +1,8 @@
 use colored::{ColoredString, Colorize};
 use std::env;
+use std::sync::LazyLock;
 
-lazy_static::lazy_static! {
-    static ref LOG_LEVEL: Level = Level::from_env();
-}
+static LOG_LEVEL: LazyLock<Level> = LazyLock::new(Level::from_env);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {

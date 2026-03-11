@@ -3,8 +3,8 @@
 use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
-use r_storage::args::{ServerArgs, ServerCommands};
-use r_storage::service::{serve_tcp_v1, serve_tcp_v2};
+use r_drive::args::{ServerArgs, ServerCommands};
+use r_drive::service::{serve_tcp_v1, serve_tcp_v2};
 
 #[tokio::main]
 async fn main() -> Result<()> {

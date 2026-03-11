@@ -4,15 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "r-storage"
+name = "rds"
 path = "src/bin/server.rs"
 
 [[bin]]
-name = "r-storage-cli"
+name = "rdc"
 path = "src/bin/client.rs"
 
 [lib]
-name = "r_storage"
+name = "r_drive"
 path = "src/lib.rs"
 
 [profile.release]
@@ -20,6 +20,13 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
+strip = true
+incremental = false
+debug = false
+
+[profile.release.package."*"]
+opt-level = 3
+codegen-units = 1
 strip = true
 incremental = false
 debug = false
@@ -41,11 +48,11 @@ hex = "0.4.3"
 serde = { version = "1.0.228", features = ["derive"] }
 dashmap = "6.1.0"
 sha2 = "0.10.9"
-lazy_static = "1.5.0"
 uuid = { version = "1.22.0", features = ["v4"] }
 indicatif = "0.18.4"
 rand = "0.10.0"
 postcard = { version = "1.1.3", features = ["alloc"] }
+# lazy_static = "1.5.0"
 # ctrlc = "3.5.2"
 # threadpool = "1.8.1"
 # multer = "3.1.0"
