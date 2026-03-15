@@ -214,7 +214,7 @@ fn handle_server_upload(
     let file_path = storage_path.join(&sanitized_id);
 
     info!(
-        "Start Uploading: {} ({} bytes) - Hash: {}",
+        "Start Uploading: {} ({} bytes) - Hash: {}...",
         filename,
         file_size,
         file_hash[..8].dimmed()
@@ -411,8 +411,8 @@ pub async fn upload_client(
     let progressbar = indicatif::ProgressBar::new(file_size);
     progressbar.set_style(
         indicatif::ProgressStyle::default_bar()
-            .template("↪ [{bar:40.cyan/magenta}] {bytes}/{total_bytes} ({eta})")?
-            .progress_chars("&>-"),
+            .template("[{bar:40.cyan/magenta}] {bytes}/{total_bytes} ({eta})")?
+            .progress_chars("$>-"),
     );
 
     // Send UPLOAD request
@@ -477,10 +477,7 @@ pub async fn upload_client(
         }
     }
 
-    println!(
-        "Upload complete. File ID: {}. Time took: {}",
-        file_id, time_took
-    );
+    println!("File ID: {} - Time took: {}", file_id, time_took);
 
     Ok(file_id)
 }
@@ -544,7 +541,7 @@ pub async fn download_client(
     let progressbar = indicatif::ProgressBar::new(file_size);
     progressbar.set_style(
         indicatif::ProgressStyle::default_bar()
-            .template("↩ [{bar:40.cyan/magenta}] {bytes}/{total_bytes} ({eta})")?
+            .template("[{bar:40.cyan/magenta}] {bytes}/{total_bytes} ({eta})")?
             .progress_chars("#>-"),
     );
 
@@ -568,9 +565,9 @@ pub async fn download_client(
         if n == 0 {
             break;
         }
-        file.write_all(&buf[..n]).context("Failed to write file")?;
         received += n as u64;
-        progressbar.inc(to_read as u64);
+        progressbar.inc(n as u64);
+        file.write_all(&buf[..n]).context("Failed to write file")?;
     }
 
     file.flush().context("Failed to flush file")?;
@@ -589,7 +586,7 @@ pub async fn download_client(
         );
     }
 
-    println!("Download successful. Saved to: {}", output.display());
+    println!("Saved to: {}", output.display());
     Ok(output)
 }
 

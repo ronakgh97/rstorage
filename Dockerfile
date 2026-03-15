@@ -27,15 +27,20 @@ WORKDIR /app
 
 COPY --from=builder /app/target/release/rds /app/rds
 
-RUN mkdir -p /home/rdrive/.rdrive/
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 
-VOLUME /home/rdrive/.rdrive/ rdrive_storage
+RUN chmod +x /app/docker-entrypoint.sh
+
+# Create config and storage directories upfront
+RUN mkdir -p /home/rdrive/.rdrive/storage
 
 EXPOSE 3000
 
 ENV LOG_LEVEL=debug
-ENV RDRIVE_HOME=/home/rdrive
+ENV HOME=/home/rdrive
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD test -f /app/rds || exit 1
 
-CMD ["/app/rds", "serve"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+
+CMD ["serve"]

@@ -72,6 +72,28 @@ file-hash: <sha256 hash>
 <binary data>
 ```
 
+### STATUS
+
+#### Request
+
+```
+STATUS
+```
+
+#### Response
+
+```
+OK
+code: 200
+timestamp: <rfc3339>
+uptime_hrs: <hours>
+no_goings_task: <count>
+total_connections: <count>
+total_bandwidth_gb: <gb>
+```
+
+---
+
 ### Example: Upload
 
 ```python
@@ -185,7 +207,7 @@ A lightweight TCP protocol using length-prefixed message framing. Reliable and s
 ### Message Format
 
 ```
-[4 bytes: payload length (u32, big-endian)][payload]
+[2 bytes: payload length (u32, big-endian)][payload]
 
 - Payload contains: command + headers + optional binary data
 - Headers end with single newline
@@ -196,7 +218,7 @@ A lightweight TCP protocol using length-prefixed message framing. Reliable and s
 #### Request
 
 ```
-[4-byte length][UPLOAD
+[2-byte length][UPLOAD
 file-name: <filename>
 file-size: <size in bytes>
 file-hash: <sha256 hash>
@@ -208,7 +230,7 @@ file-key: <secret key>
 #### Response (Success)
 
 ```
-[4-byte length][OK
+[2-byte length][OK
 file-id: <uuid>
 file-key: <secret key>
 time-took: <seconds>]
@@ -217,7 +239,7 @@ time-took: <seconds>]
 #### Response (Error)
 
 ```
-[4-byte length][ERROR
+[2-byte length][ERROR
 code: <http status code>
 message: <error message>]
 ```
@@ -229,7 +251,7 @@ message: <error message>]
 #### Request
 
 ```
-[4-byte length][DOWNLOAD
+[2-byte length][DOWNLOAD
 file-id: <uuid>
 file-key: <secret key>]
 ```
@@ -237,12 +259,12 @@ file-key: <secret key>]
 #### Response
 
 ```
-[4-byte length][OK
+[2-byte length][OK
 file-name: <filename>
 file-size: <size in bytes>
-file-hash: <sha256 hash>
+file-hash: <sha256 hash>]
 
-<binary data>]
+<binary data>
 ```
 
 ---
@@ -395,3 +417,20 @@ if header:
             print(f"Hash mismatch! expected: {expected_hash}, got: {actual_hash}")
 ```
 
+---
+
+## Security
+
+**ChaCha128** encrypts file metadata at rest.
+
+- Key: 256-bit, auto-generated or set via `MASTER_KEY` env var
+- Nonce: 96-bit, random per encryption
+- 128 diffusion rounds
+- Checkout implementation: ![Impl](src/lib.rs)
+
+Files stored as:
+
+- `~/.rdrive/storage/<file_id>` - raw file data
+- `~/.rdrive/storage/<file_id>.meta` - encrypted metadata (nonce || ciphertext)
+
+NOTE: raw-file isnt encrypyted
