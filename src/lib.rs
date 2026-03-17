@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, OnceLock, RwLock};
+use std::sync::{Arc, LazyLock, OnceLock};
+use tokio::sync::RwLock;
 
 pub mod args;
 pub mod log;
@@ -14,7 +15,7 @@ pub mod protocol_v1;
 pub mod protocol_v2;
 pub mod service;
 
-#[inline]
+#[inline(always)]
 pub async fn get_storage_path() -> Result<PathBuf> {
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
@@ -22,7 +23,7 @@ pub async fn get_storage_path() -> Result<PathBuf> {
     Ok(storage_path)
 }
 
-#[inline(always)]
+#[inline]
 pub fn get_storage_path_blocking() -> Result<PathBuf> {
     let home_dir =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
@@ -43,9 +44,9 @@ pub fn file_hasher(path: &Path) -> Result<String> {
     use sha2::{Digest, Sha256};
     let file = std::fs::File::open(path)?;
 
-    let mut buf_reader = std::io::BufReader::with_capacity(6 * 1024 * 1024, file);
+    let mut buf_reader = std::io::BufReader::with_capacity(3 * 1024 * 1024, file);
     let mut hasher = Sha256::new();
-    let mut buf = [0u8; READ_CHUNK_SIZE * 2];
+    let mut buf = [0u8; 1024 * 64 * 2];
 
     loop {
         let bytes_read = buf_reader.read(&mut buf)?;
@@ -58,7 +59,14 @@ pub fn file_hasher(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-#[inline]
+#[inline(always)]
+pub async fn file_hasher_async(path: &Path) -> Result<String> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || file_hasher(&path)).await?
+}
+
+/// Returns (timestamp, uptime_hrs, total_connections, total_bandwidth_gb)
+#[inline(always)]
 pub fn parse_status_line(status_response: &str) -> (String, String, String, String) {
     let mut timestamp = String::new();
     let mut uptime_hrs = String::new();
@@ -103,7 +111,6 @@ impl Metadata {
     pub fn read_from_disk(path: &PathBuf) -> Result<Self> {
         use postcard::from_bytes;
 
-        // Get or set
         let key = try_get_master_key().unwrap_or_else(|| {
             let new_master_key = generate_master_key();
             MASTER_KEY.set(new_master_key.clone()).ok();
@@ -118,10 +125,14 @@ impl Metadata {
         Ok(metadata)
     }
 
+    pub async fn read_from_disk_async(path: &Path) -> Result<Self> {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || Self::read_from_disk(&path)).await?
+    }
+
     pub fn save_to_disk(&self, path: &PathBuf) -> Result<()> {
         use postcard::to_allocvec;
 
-        // Get or set
         let key = try_get_master_key().unwrap_or_else(|| {
             let new_master_key = generate_master_key();
             MASTER_KEY.set(new_master_key.clone()).ok();
@@ -134,6 +145,17 @@ impl Metadata {
 
         std::fs::write(path, encrypted)?;
         Ok(())
+    }
+
+    pub async fn save_to_disk_async(&self, path: &Path) -> Result<()> {
+        let path = path.to_path_buf();
+        let self_clone = Self {
+            filename: self.filename.clone(),
+            file_size: self.file_size,
+            file_hash: self.file_hash.clone(),
+            file_key: self.file_key.clone(),
+        };
+        tokio::task::spawn_blocking(move || self_clone.save_to_disk(&path)).await?
     }
 }
 
@@ -155,19 +177,19 @@ impl Catalog {
         }
     }
 
-    pub fn read(path: &PathBuf) -> Result<Self> {
+    pub async fn read(path: &PathBuf) -> Result<Self> {
         use postcard::from_bytes;
 
-        let file = std::fs::read(path)?;
+        let file = tokio::fs::read(path).await?;
         let catalog = from_bytes(&file)?;
         Ok(catalog)
     }
 
-    pub fn write(&mut self, path: &PathBuf) -> Result<()> {
+    pub async fn write(&mut self, path: &PathBuf) -> Result<()> {
         use postcard::to_allocvec;
 
         let bytes = to_allocvec(self)?;
-        std::fs::write(path, bytes)?;
+        tokio::fs::write(path, bytes).await?;
         Ok(())
     }
 }
@@ -518,8 +540,8 @@ pub static MASTER_KEY: OnceLock<String> = OnceLock::new();
 pub static SERVER_TRACKER: LazyLock<Arc<RwLock<Tracker>>> =
     LazyLock::new(|| Arc::new(RwLock::new(Tracker::default())));
 
-#[inline]
 /// Get the server uptime in hours
+#[inline]
 pub fn try_get_uptime_hrs() -> f64 {
     if let Some(start_time) = START_TIME.get() {
         let now = chrono::Local::now();
@@ -543,6 +565,7 @@ pub const READ_CHUNK_SIZE: usize = 64 * 1024;
 
 #[derive(Clone)]
 pub struct Tracker {
+    // TODO: Add more
     pub total_connections: usize,
     pub total_bandwidth_gb: f64,
 }

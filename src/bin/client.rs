@@ -57,7 +57,7 @@ async fn main() -> Result<()> {
 
                 // Read existing or new
                 let mut catalog = if catalog_path.exists() {
-                    Catalog::read(&catalog_path)?
+                    Catalog::read(&catalog_path).await?
                 } else {
                     Catalog::default()
                 };
@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
                     .file_map
                     .insert(key, file.file_name().unwrap().to_string_lossy().to_string());
 
-                catalog.write(&catalog_path)?;
+                catalog.write(&catalog_path).await?;
             } else {
                 upload_file_v2(file, file_key, "localhost", port).await?;
             }
@@ -190,7 +190,7 @@ fn ascii_art() {
 }
 
 async fn list_file_map() -> Result<()> {
-    let file_map = Catalog::read(&get_catalog_path()?)?;
+    let file_map = Catalog::read(&get_catalog_path()?).await?;
 
     for (id, name) in file_map.file_map {
         println!("  {} - {}", id.yellow(), name.cyan());
