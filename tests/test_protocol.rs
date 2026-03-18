@@ -3,6 +3,7 @@ use rand::RngExt;
 use sha2::{Digest, Sha256};
 use std::io::ErrorKind;
 use std::net::TcpListener;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -10,7 +11,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 pub const GARBAGE_SIZE: u32 = 64 * 1024 * 1024;
 
-#[inline]
+#[inline(always)]
 fn get_random_bytes(size: u32) -> Vec<u8> {
     let mut rng = rand::rng();
     (0..size).map(|_| rng.random::<u8>()).collect()
@@ -52,10 +53,14 @@ async fn wait_for_server(port: u16) {
 }
 
 async fn start_server_v2(port: u16) -> JoinHandle<()> {
-    tokio::fs::create_dir_all(storage_path()).await.unwrap();
+    let path = get_storage_path_blocking().unwrap();
+
+    tokio::fs::create_dir_all(&path).await.unwrap();
 
     let handle = tokio::spawn(async move {
-        r_drive::protocol_v2::start_tcp_server(port).await.unwrap();
+        r_drive::protocol_v2::start_tcp_server(port, 128, Arc::new(path))
+            .await
+            .unwrap();
     });
 
     wait_for_server(port).await;
@@ -63,10 +68,14 @@ async fn start_server_v2(port: u16) -> JoinHandle<()> {
 }
 
 async fn start_server_v1(port: u16) -> JoinHandle<()> {
-    tokio::fs::create_dir_all(storage_path()).await.unwrap();
+    let path = get_storage_path_blocking().unwrap();
+
+    tokio::fs::create_dir_all(&path).await.unwrap();
 
     let handle = tokio::spawn(async move {
-        r_drive::protocol_v1::start_tcp_server(port).await.unwrap();
+        r_drive::protocol_v1::start_tcp_server(port, 128, Arc::new(path))
+            .await
+            .unwrap();
     });
 
     wait_for_server(port).await;
@@ -81,7 +90,7 @@ async fn stop_server(handle: JoinHandle<()>) {
 async fn read_until_double_newline(stream: &mut TcpStream) -> String {
     let mut response = String::new();
     let mut prev = b'\0';
-    let mut buf = [0u8; 1];
+    let mut buf = [0u8; 1]; // Byte by Byte
 
     loop {
         let n = stream.read(&mut buf).await.unwrap();

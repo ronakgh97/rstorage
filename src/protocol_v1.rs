@@ -1,7 +1,7 @@
 use crate::{
-    MAX_FILE_SIZE, Metadata, NETWORK_BUFFER_SIZE, ON_GOINGS, READ_CHUNK_SIZE, SERVER_TRACKER,
-    START_TIME, debug, error, file_hasher_async, get_storage_path, info, parse_status_line, trace,
-    try_get_uptime_hrs, warn,
+    MAX_FILE_SIZE, Metadata, NETWORK_BUFFER_SIZE, ON_GOINGS, READ_CHUNK_SIZE, READ_TIMEOUT,
+    SERVER_TRACKER, START_TIME, WRITE_TIMEOUT, debug, error, file_hasher_async, info,
+    parse_status_line, trace, try_get_uptime_hrs, warn,
 };
 use anyhow::{Context, Result};
 use colored::Colorize;
@@ -9,28 +9,47 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::time::timeout;
 use uuid::Uuid;
 
-pub async fn start_tcp_server(port: u16) -> Result<()> {
+pub async fn start_tcp_server(
+    port: u16,
+    max_connections: usize,
+    storage_path: Arc<PathBuf>,
+) -> Result<()> {
     let now = chrono::Local::now();
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
 
-    let storage_path = get_storage_path().await?;
-    let storage_path = Arc::new(storage_path);
+    let active_connections = Arc::new(AtomicUsize::new(0));
 
-    info!("TCP Server (v1 protocol) listening on 0.0.0.0:{}", port);
+    info!(
+        "TCP Server (v1 protocol) listening on 0.0.0.0:{} (max connections: {})",
+        port, max_connections
+    );
     START_TIME.get_or_init(|| now);
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
-                info!("Connection request from {:?}", addr);
+                // Check connection limit
+                let current = active_connections.fetch_add(1, Ordering::Relaxed);
+                if current >= max_connections {
+                    active_connections.fetch_sub(1, Ordering::Relaxed);
+                    warn!("Connection rejected (max connections): {:?}", addr);
+                    drop(stream); // Instant close
+                    continue;
+                }
                 let storage_path = Arc::clone(&storage_path);
+                let active_connections = Arc::clone(&active_connections);
+                info!("Connection request from {:?}", addr);
                 tokio::spawn(async move {
                     trace!("Task spawned for connection from {:?}", addr);
-                    if let Err(e) = handle_connection(stream, &storage_path).await {
+                    let result = handle_connection(stream, &storage_path).await;
+                    active_connections.fetch_sub(1, Ordering::Relaxed);
+                    if let Err(e) = result {
                         error!("Error handling connection from {:?}: {}", addr, e);
                     }
                 });
@@ -49,10 +68,13 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &std::path::Path
 
     let (mut reader, mut writer) = stream.split();
 
-    let (command, headers) = match read_request(&mut reader).await {
+    let (command, headers) = match read_headers(&mut reader).await {
         Ok((cmd, hdr)) => (cmd, hdr),
         Err(e) => {
-            // Handle early EOF gracefully
+            // Handle timeout or early EOF
+            if e.to_string().contains("Timeout") {
+                let _ = send_error(&mut writer, 408, "Request timeout").await;
+            }
             if e.to_string().contains("early eof") || e.to_string().contains("EOF") {
                 return Ok(());
             }
@@ -85,8 +107,8 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &std::path::Path
     Ok(())
 }
 
-#[inline]
-async fn read_request<R: AsyncReadExt + Unpin>(
+#[inline(always)]
+async fn read_headers<R: AsyncReadExt + Unpin>(
     reader: &mut R,
 ) -> Result<(String, HashMap<String, String>)> {
     let len = read_frame_length(reader).await? as usize;
@@ -117,14 +139,21 @@ async fn read_request<R: AsyncReadExt + Unpin>(
     Ok((command, headers))
 }
 
+// Read 2 bytes for frame length with timeout, return error on timeout or read failure
 #[inline]
 pub async fn read_frame_length<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<u16> {
     let mut len_buf = [0u8; 2];
-    reader.read_exact(&mut len_buf).await?;
+    let Ok(result) = timeout(READ_TIMEOUT, reader.read_exact(&mut len_buf)).await else {
+        return Err(anyhow::anyhow!("Timeout reading frame length"));
+    };
+    if let Err(e) = result {
+        return Err(anyhow::anyhow!("Read error: {}", e));
+    }
     let len = u16::from_be_bytes(len_buf);
     Ok(len)
 }
 
+/// Write a given byte frame
 #[inline]
 pub async fn write_frame<W: AsyncWriteExt + Unpin>(writer: &mut W, data: &[u8]) -> Result<()> {
     let len = data.len();
@@ -145,7 +174,7 @@ async fn send_error<W: AsyncWriteExt + Unpin>(
     message: &str,
 ) -> Result<()> {
     let response = format!("ERROR\ncode: {}\nmessage: {}", code, message);
-    write_frame(writer, response.as_bytes()).await?;
+    timeout(WRITE_TIMEOUT, write_frame(writer, response.as_bytes())).await??;
     writer.shutdown().await?;
     Ok(())
 }
@@ -167,7 +196,7 @@ async fn send_status<W: AsyncWriteExt + Unpin>(writer: &mut W, code: u16) -> Res
         code, timestamp, uptime_hrs, ongoing, total_connections, total_bandwidth_gb
     );
 
-    write_frame(writer, response.as_bytes()).await?;
+    timeout(WRITE_TIMEOUT, write_frame(writer, response.as_bytes())).await??;
     writer.shutdown().await?;
     Ok(())
 }
@@ -183,7 +212,8 @@ async fn send_ok_upload<W: AsyncWriteExt + Unpin>(
         "OK\nfile-id: {}\nfile-key: {}\ntime-took: {}",
         file_id, file_key, time_took
     );
-    write_frame(writer, response.as_bytes()).await?;
+    timeout(WRITE_TIMEOUT, write_frame(writer, response.as_bytes())).await??;
+    writer.shutdown().await?; // Close connection after response
     Ok(())
 }
 
@@ -364,13 +394,15 @@ async fn handle_download<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         "OK\nfile-name: {}\nfile-size: {}\nfile-hash: {}\n",
         filename, file_size, file_hash
     );
-    write_frame(writer, header.as_bytes()).await?;
 
-    let mut file = tokio::fs::File::open(&file_path).await?;
-    let mut buf = vec![0u8; NETWORK_BUFFER_SIZE];
+    timeout(WRITE_TIMEOUT, write_frame(writer, header.as_bytes())).await??;
+
+    let file = tokio::fs::File::open(&file_path).await?;
+    let mut buf_file = BufReader::with_capacity(NETWORK_BUFFER_SIZE, file);
+    let mut buf = vec![0u8; READ_CHUNK_SIZE];
 
     loop {
-        let n = file.read(&mut buf).await?;
+        let n = buf_file.read(&mut buf).await?;
         if n == 0 {
             break;
         }
@@ -415,11 +447,6 @@ pub async fn upload_client(
         .context("Failed to compute file hash")?;
     println!("↪ File hash: {}...", file_hash.to_string().dimmed());
 
-    let request = format!(
-        "UPLOAD\nfile-name: {}\nfile-size: {}\nfile-hash: {}\nfile-key: {}\n",
-        filename, file_size, file_hash, lock_key
-    );
-
     let progress_bar = indicatif::ProgressBar::new(file_size);
     progress_bar.set_style(
         indicatif::ProgressStyle::default_bar()
@@ -427,19 +454,30 @@ pub async fn upload_client(
             .progress_chars("$>-"),
     );
 
-    let (mut reader, mut writer) = stream.split();
+    let request = format!(
+        "UPLOAD\nfile-name: {}\nfile-size: {}\nfile-hash: {}\nfile-key: {}\n",
+        filename, file_size, file_hash, lock_key
+    );
 
+    let (reader, mut writer) = stream.split();
+    // TODO: Remove buffers?
+    let mut reader = BufReader::with_capacity(NETWORK_BUFFER_SIZE * 2, reader);
     let len = (request.len() as u16).to_be_bytes();
     writer.write_all(&len).await?;
     writer.write_all(request.as_bytes()).await?;
+    writer.flush().await.context("Failed to flush request")?;
 
-    let mut file = tokio::fs::File::open(&path)
+    let file = tokio::fs::File::open(&path)
         .await
         .context("Failed to reopen file")?;
+    let mut buf_file = BufReader::with_capacity(NETWORK_BUFFER_SIZE, file);
     let mut buf = vec![0u8; READ_CHUNK_SIZE];
 
     loop {
-        let n = file.read(&mut buf).await.context("Failed to read file")?;
+        let n = buf_file
+            .read(&mut buf)
+            .await
+            .context("Failed to read file")?;
         if n == 0 {
             break;
         }
@@ -452,7 +490,6 @@ pub async fn upload_client(
 
     progress_bar.finish_and_clear();
     writer.flush().await.context("Failed to flush")?;
-    writer.shutdown().await.context("Failed to shutdown")?;
 
     let mut len_buf = [0u8; 2];
     reader
@@ -484,6 +521,8 @@ pub async fn upload_client(
             time_took = time.trim().to_string();
         }
     }
+
+    stream.shutdown().await.ok();
 
     println!("File ID: {} - Time took: {}", file_id, time_took);
 
@@ -589,6 +628,8 @@ pub async fn download_client(
         );
     }
 
+    stream.shutdown().await.ok();
+
     println!("Saved to: {}", output_path.display());
     Ok(output_path)
 }
@@ -622,6 +663,8 @@ pub async fn get_status_v1(host: &str, port: u16) -> Result<(String, String, Str
     if !response.starts_with("OK\n") {
         anyhow::bail!("Status request failed: {}", response);
     }
+
+    stream.shutdown().await.ok();
 
     Ok(parse_status_line(&response))
 }

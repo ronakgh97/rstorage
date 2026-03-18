@@ -2,7 +2,7 @@ Tweaking with TCP UDP QDP because Im bored
 
 Im in need of simple storage server, which can be use in CI pipeline and my other projects...
 
-My initial thoughts
+(My initial thoughts
 
 - The protocol will be very simple and secure, ok
 - Upload request will contain headers: file-name, file-size, file-hash and a KEY, this key is kind of...lets say a
@@ -21,7 +21,7 @@ My initial thoughts
   locking, and
   also I will use Tokio for async file ops, so it should be good
 - File storage? Of course...Local storage or docker volumes (later)
-- Security....*sighhh*..encryption keys I guess...
+- Security....*sighhh*..encryption keys I guess...)
 
 ---
 
@@ -73,6 +73,8 @@ TODO
   of temporary keys or
   something, idk
 - Migrate to async architecture (TOKIO)
+- Too many repetitive code, need to refactor and clean up the codebase, perform MACRO DOMAIN EXPANSION 🔴+🔵 => 🟣
+- Still some buffering issues, data gets stalls, does not flush properly
 
 ISSUE
 

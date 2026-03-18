@@ -38,6 +38,9 @@ EXPOSE 3000
 
 ENV LOG_LEVEL=debug
 ENV HOME=/home/rdrive
+ENV MAX_CONNECTIONS=128
+ENV MAX_FILE_SIZE=1073741824
+ENV MAX_FILE_SIZE_GB=12
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD test -f /app/rdrive-server || exit 1
 

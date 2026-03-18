@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, OnceLock};
+use std::time::Duration;
 use tokio::sync::RwLock;
 
 pub mod args;
@@ -532,10 +533,9 @@ fn test_encrypt_decrypt_empty() {
 }
 
 pub static START_TIME: OnceLock<chrono::DateTime<chrono::Local>> = OnceLock::new();
-
 pub static ON_GOINGS: LazyLock<DashMap<String, String>> = LazyLock::new(DashMap::new);
-
 pub static MASTER_KEY: OnceLock<String> = OnceLock::new();
+pub static MAX_CONNECTIONS: OnceLock<usize> = OnceLock::new();
 
 pub static SERVER_TRACKER: LazyLock<Arc<RwLock<Tracker>>> =
     LazyLock::new(|| Arc::new(RwLock::new(Tracker::default())));
@@ -562,6 +562,10 @@ pub const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024 * 1024;
 pub const NETWORK_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
 pub const READ_CHUNK_SIZE: usize = 64 * 1024;
+
+// For Header only
+pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
+pub const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct Tracker {

@@ -1,0 +1,22 @@
+FROM rust:1.93.1-slim-bookworm
+
+RUN apt-get update && apt-get install -y \
+    pkg-config libssl-dev clang cmake build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY tests ./tests
+
+RUN cargo build --release --bin rdrive-server && \
+    cargo build --release --bin rdrive
+
+ENV LOG_LEVEL=debug
+ENV HOME=/home/rdrive
+ENV MAX_CONNECTIONS=128
+ENV MAX_FILE_SIZE=1073741824
+ENV MAX_FILE_SIZE_GB=12
+
+CMD ["cargo", "test", "--release", "--test", "test_protocol"]
