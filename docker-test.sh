@@ -17,8 +17,8 @@ docker network create $NETWORK 2>/dev/null || true
 
 docker build -f Dockerfile.test -t $IMAGE_NAME .
 
-# Run cargo tests
-docker run --rm --network $NETWORK $IMAGE_NAME cargo test --release --test test_protocol
+# Run cargo tests (single threaded to avoid race conditions)
+docker run --rm --network $NETWORK $IMAGE_NAME cargo test --release --test test_protocol -- --test-threads=1
 
 # Start servers
 echo "Starting v1 server"

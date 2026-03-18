@@ -536,6 +536,13 @@ pub static START_TIME: OnceLock<chrono::DateTime<chrono::Local>> = OnceLock::new
 pub static ON_GOINGS: LazyLock<DashMap<String, String>> = LazyLock::new(DashMap::new);
 pub static MASTER_KEY: OnceLock<String> = OnceLock::new();
 pub static MAX_CONNECTIONS: OnceLock<usize> = OnceLock::new();
+pub static MAX_FILE_SIZE: LazyLock<u64> = LazyLock::new(|| {
+    // 8 GB default
+    std::env::var("MAX_FILE_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8 * 1024 * 1024 * 1024)
+});
 
 pub static SERVER_TRACKER: LazyLock<Arc<RwLock<Tracker>>> =
     LazyLock::new(|| Arc::new(RwLock::new(Tracker::default())));
@@ -556,8 +563,6 @@ pub fn try_get_uptime_hrs() -> f64 {
 pub fn try_get_master_key() -> Option<String> {
     MASTER_KEY.get().cloned()
 }
-
-pub const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024 * 1024;
 
 pub const NETWORK_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 

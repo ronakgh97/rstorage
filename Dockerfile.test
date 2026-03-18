@@ -13,10 +13,10 @@ COPY tests ./tests
 RUN cargo build --release --bin rdrive-server && \
     cargo build --release --bin rdrive
 
-ENV LOG_LEVEL=debug
-ENV HOME=/home/rdrive
-ENV MAX_CONNECTIONS=128
-ENV MAX_FILE_SIZE=1073741824
-ENV MAX_FILE_SIZE_GB=12
+ENV LOG_LEVEL=trace
+ENV PORT=3000
+ENV MAX_CONNECTION=128
+ENV MAX_FILE_SIZE="12 * 1024 * 1024 * 1024"
+ENV MASTER_KEY=77af778b51abd4a3c51c5ddd97204a9c3ae614ebccb75a606c3b6865aed6744e
 
 CMD ["cargo", "test", "--release", "--test", "test_protocol"]

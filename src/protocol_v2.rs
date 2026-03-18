@@ -218,8 +218,13 @@ async fn handle_server_upload<
         .and_then(|v| v.parse().ok())
         .ok_or_else(|| anyhow::anyhow!("Missing or invalid file-size header"))?;
 
-    if file_size > MAX_FILE_SIZE {
-        warn!("File size {} exceeds 10GB limit", file_size);
+    let file_size_limit = *MAX_FILE_SIZE;
+
+    if file_size > file_size_limit {
+        warn!(
+            "File size {} exceeds {}GB limit",
+            file_size_limit, file_size
+        );
         send_error(writer, 413, "File size exceeds 10GB limit").await?;
         return Ok(());
     }
