@@ -16,17 +16,10 @@ name = "r_drive"
 path = "src/lib.rs"
 
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
-strip = true
-incremental = false
-debug = false
-
-[profile.release.package."*"]
-opt-level = "z"
-codegen-units = 1
 strip = true
 incremental = false
 debug = false
@@ -37,8 +30,8 @@ debug = true
 incremental = true
 
 [dependencies]
-tokio = { version = "1.50.0", features = ["full"] }
-clap = { version = "4.6.0", features = ["derive"] }
+tokio = { version = "1.52.1", features = ["full"] }
+clap = { version = "4.6.1", features = ["derive"] }
 anyhow = "1.0.102"
 chrono = "0.4.44"
 colored = "3.1.1"
@@ -46,12 +39,13 @@ dirs = "6.0.0"
 dotenv = "0.15.0"
 hex = "0.4.3"
 serde = { version = "1.0.228", features = ["derive"] }
-dashmap = "6.1.0"
-sha2 = "0.10.9"
-uuid = { version = "1.22.0", features = ["v4"] }
+dashmap = "7.0.0-rc2"
+sha2 = "0.11.0"
+uuid = { version = "1.23.1", features = ["v4"] }
 indicatif = "0.18.4"
-rand = "0.10.0"
+rand = "0.10.1"
 postcard = { version = "1.1.3", features = ["alloc"] }
+# aes = "0.9.0"
 # threadpool = "1.8.1"
 # multer = "3.1.0"
 # futures-util = "0.3.32"

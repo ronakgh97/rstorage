@@ -16,6 +16,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 use uuid::Uuid;
 
+/// Entry-point for TCP server using the v1 protocol
 pub async fn start_tcp_server(
     port: u16,
     max_connections: usize,
@@ -61,6 +62,7 @@ pub async fn start_tcp_server(
     }
 }
 
+/// Handle a single client connection, read command and dispatch to appropriate handler
 #[inline]
 async fn handle_connection(mut stream: TcpStream, storage_path: &std::path::Path) -> Result<()> {
     let start_time = Instant::now();
@@ -93,7 +95,7 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &std::path::Path
         "DELETE" => {
             send_error(&mut writer, 501, "DELETE not implemented").await?;
         }
-        "STATUS" => send_status(&mut writer, 200).await?,
+        "STATUS" => send_status(&mut writer).await?,
         _ => {
             send_error(&mut writer, 400, "Unknown command").await?;
         }
@@ -107,6 +109,7 @@ async fn handle_connection(mut stream: TcpStream, storage_path: &std::path::Path
     Ok(())
 }
 
+// Read headers with timeout, return command and headers map, handle timeout and early EOF
 #[inline(always)]
 async fn read_headers<R: AsyncReadExt + Unpin>(
     reader: &mut R,
@@ -153,7 +156,7 @@ pub async fn read_frame_length<R: AsyncReadExt + Unpin>(reader: &mut R) -> Resul
     Ok(len)
 }
 
-/// Write a given byte frame
+// Write a frame with 2-byte length prefix, return error on write failure
 #[inline]
 pub async fn write_frame<W: AsyncWriteExt + Unpin>(writer: &mut W, data: &[u8]) -> Result<()> {
     let len = data.len();
@@ -167,6 +170,16 @@ pub async fn write_frame<W: AsyncWriteExt + Unpin>(writer: &mut W, data: &[u8]) 
     Ok(())
 }
 
+// Send an error response with code and message, then close the connection
+#[inline]
+async fn send_ok<W: AsyncWriteExt + Unpin>(writer: &mut W, response_str: &str) -> Result<()> {
+    let response = format!("OK\n{}", response_str);
+    timeout(WRITE_TIMEOUT, write_frame(writer, response.as_bytes())).await??;
+    writer.shutdown().await?; // Close connection after response
+    Ok(())
+}
+
+// Send an error response with code and message, then close the connection
 #[inline]
 async fn send_error<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
@@ -179,8 +192,9 @@ async fn send_error<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
+// Send a status response with server info, then close the connection
 #[inline]
-async fn send_status<W: AsyncWriteExt + Unpin>(writer: &mut W, code: u16) -> Result<()> {
+async fn send_status<W: AsyncWriteExt + Unpin>(writer: &mut W) -> Result<()> {
     let uptime_hrs = try_get_uptime_hrs();
     let ongoing = ON_GOINGS.len();
 
@@ -192,8 +206,8 @@ async fn send_status<W: AsyncWriteExt + Unpin>(writer: &mut W, code: u16) -> Res
     let timestamp = chrono::Utc::now().to_rfc3339();
 
     let response = format!(
-        "OK\ncode: {}\ntimestamp: {}\nuptime_hrs: {}\nno_goings_task: {}\ntotal_connections: {}\ntotal_bandwidth_gb: {}\n\n",
-        code, timestamp, uptime_hrs, ongoing, total_connections, total_bandwidth_gb
+        "OK\nTIMESTAMP: {}\nUPTIME_HRS: {}\nON_GOING_TASKS: {}\nTOTAL CONNECTIONS: {}\nTOTAL_BANDWIDTH_GB: {}\n\n",
+        timestamp, ongoing, uptime_hrs, total_connections, total_bandwidth_gb
     );
 
     timeout(WRITE_TIMEOUT, write_frame(writer, response.as_bytes())).await??;
@@ -201,22 +215,7 @@ async fn send_status<W: AsyncWriteExt + Unpin>(writer: &mut W, code: u16) -> Res
     Ok(())
 }
 
-#[inline]
-async fn send_ok_upload<W: AsyncWriteExt + Unpin>(
-    writer: &mut W,
-    file_id: &str,
-    file_key: &str,
-    time_took: f64,
-) -> Result<()> {
-    let response = format!(
-        "OK\nfile-id: {}\nfile-key: {}\ntime-took: {}",
-        file_id, file_key, time_took
-    );
-    timeout(WRITE_TIMEOUT, write_frame(writer, response.as_bytes())).await??;
-    writer.shutdown().await?; // Close connection after response
-    Ok(())
-}
-
+//
 async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     reader: &mut R,
     writer: &mut W,
@@ -277,17 +276,18 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
     let mut received: u64 = 0;
     let mut buf = vec![0u8; READ_CHUNK_SIZE];
 
-    while received < file_size {
-        let to_read = std::cmp::min(buf.len(), (file_size - received) as usize);
-        let n = reader.read(&mut buf[..to_read]).await?;
-        if n == 0 {
-            break;
+    {
+        while received < file_size {
+            let to_read = std::cmp::min(buf.len(), (file_size - received) as usize);
+            let n = reader.read(&mut buf[..to_read]).await?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            buf_file.write_all(&buf[..n]).await?;
+            received += n as u64;
         }
-        hasher.update(&buf[..n]);
-        buf_file.write_all(&buf[..n]).await?;
-        received += n as u64;
     }
-
     buf_file.flush().await?;
 
     if received != file_size {
@@ -297,7 +297,7 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
         return Ok(());
     }
 
-    let computed_hash = format!("{:x}", hasher.finalize());
+    let computed_hash = hex::encode(hasher.finalize()).to_string();
     if computed_hash != file_hash {
         tokio::fs::remove_file(&file_path).await.ok();
         warn!(
@@ -321,10 +321,15 @@ async fn handle_upload<R: AsyncReadExt + Unpin, W: AsyncWriteExt + Unpin>(
 
     ON_GOINGS.remove(&file_id);
 
-    let time_took = time_start.elapsed().as_secs_f64();
-    send_ok_upload(writer, &file_id, &file_key, time_took).await?;
+    let time_took = time_start.elapsed().as_secs_f32();
+    let response_str = format!("file-id: {}\ntime-took: {}\n", file_id, time_took);
+    send_ok(writer, &response_str).await?;
 
-    info!("Upload complete: File-ID: {}", file_id.dimmed());
+    info!(
+        "Upload complete: File-ID: {}... Time_taken: {}F",
+        &file_id[..8].dimmed(),
+        time_took
+    );
 
     let mut lock = SERVER_TRACKER.write().await;
     lock.total_bandwidth_gb += file_size as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -456,7 +461,7 @@ pub async fn upload_client(
     let progress_bar = indicatif::ProgressBar::new(file_size);
     progress_bar.set_style(
         indicatif::ProgressStyle::default_bar()
-            .template("[{bar:60.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
+            .template("[{bar:60.cyan/magenta}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
             .progress_chars("$>-"),
     );
 

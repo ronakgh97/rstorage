@@ -1,31 +1,4 @@
-Tweaking with TCP UDP QDP because Im bored
-
-Im in need of simple storage server, which can be use in CI pipeline and my other projects...
-
-(My initial thoughts
-
-- The protocol will be very simple and secure, ok
-- Upload request will contain headers: file-name, file-size, file-hash and a KEY, this key is kind of...lets say a
-  master key, nothing much it locks/unlocks the files and return file-Id to client, this file-Id is used to download the
-  file later on, and also to delete the file if needed, ok?
-- Download request will contain headers: the KEY only for now (I cant think much anything right now and I want to keep
-  client simple, just know file-Id and the KEY, if the key is correct, the file will be downloaded, otherwise it will
-  return an error and also request path will contain file-Id, so the download request will be like: /download/{file-Id}
-- Delete request will be like: /delete/{file-Id} and it will contain the KEY in the header, if the key is correct, the
-  file will be deleted, or ongoing task is happening, it will return an error
-- Now then What Ifs... If client forgot file-Id or the KEY, well then...good luck :), and all files will be unique cuz
-  of file-Id, In the future, I am thinking having file-Id in this format: {6x}-{6x}-{6x}-{6x}, now with PCM, there will
-  6 hexadecimal characters, each section with 16^6 combinations, and total of 4 section so 16^24 combinations, so no
-  collisions...I hope
-- Concurrency, well Thread spawning/Pool will handle that, and I will Dashmap to keep track of the all ops with minimal
-  locking, and
-  also I will use Tokio for async file ops, so it should be good
-- File storage? Of course...Local storage or docker volumes (later)
-- Security....*sighhh*..encryption keys I guess...)
-
----
-
-Usage
+Tweaking with TCP UDP QDP while building AWS s3 because I'm bored
 
 Use docker [Image](https://hub.docker.com/repository/docker/ronakgh97/rdrive/general)
 
@@ -34,10 +7,10 @@ docker pull ronakgh97/rdrive:latest (<60 mb)
 docker run -d -p 3000:3000 -v rdrive-storage:/home/rdrive/.rdrive/storage --name rdrive ronakgh97/rdrive:latest
 ```
 
-Use this client wrapper (You can write your own client, read [Protocol](PROTOCOL.md))
+Then you can use the CLI to push/pull files
 
 ```shell
-rdrive push --file dummy.bin --port 3000 --protocol v2        
+rdrive push --file dummy.bin --port 3000 --protocol v1       
 Enter a lock key: ronak
 ↪ Starting upload: dummy.bin (1180000000 bytes)
 ↪ File hash: ef5bfea558b31b8ecf673a0445ec035394f9a3a40fad69cd8a9ad1c5f5aaf56b...
@@ -45,7 +18,7 @@ File ID: 2e8e2c5e-9f36-4369-802f-81d6b7fc0e69 - Time took: 3.350482605
 ````
 
 ```shell
-rdrive pull --output . --port 3000 --protocol v2            
+rdrive pull --output . --port 3000 --protocol v1      
 File already exists. Do you want to overwrite it? (y/n): y
 Enter file ID: 2e8e2c5e-9f36-4369-802f-81d6b7fc0e69
 Enter file key: ronak
@@ -53,29 +26,28 @@ Enter file key: ronak
 Saved to: .\dummy.bin
 ```
 
----
-
 TODO
 
-- Encryption keys for storage and metadata
-- Bandwidth tracking and limits
+- Better Encryption for storage and metadata
+- Better Bandwidth tracking and limits
 - Better Error handling and logging
 - Thread pool for better concurrency and resource management
 - Better file management and cleanup strategies
 - Authentication and access control
-- Docker support
 - Uhm...what else?
-- Fix and improve the buffering and streaming for large files
+- Fix and improve the buffering and streaming for large files (diff hashing, chunking, chopping, etc.)
 - More protocol features like file listing, metadata retrieval, more commands etc.
 - Graceful shutdown and cleanup
 - Little bit client polish
-- Protocol v1 meant to be use UDP, but skill issues...
+- Protocol v2 meant to be use UDP, but skill issues...
 - Encrypted share feature between clients (stateless relay server) without sharing the master key, maybe using some kind
   of temporary keys or
   something, idk
 - Migrate to async architecture (TOKIO)
-- Too many repetitive code, need to refactor and clean up the codebase, perform MACRO DOMAIN EXPANSION 🔴+🔵 => 🟣
+- Too many repetitive code, need to refactor and clean up the codebase
 - Still some buffering issues, data gets stalls, does not flush properly
+- Multi-port support for better concurrency
+- rsync support (rolling hashing, delta transfers, etc.)
 
 ISSUE
 

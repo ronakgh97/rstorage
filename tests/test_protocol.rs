@@ -4,17 +4,24 @@ use sha2::{Digest, Sha256};
 use std::io::ErrorKind;
 use std::net::TcpListener;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::task::{JoinHandle, JoinSet};
 
-pub const GARBAGE_SIZE: u32 = 64 * 1024 * 1024;
+pub const GARBAGE_SIZE: usize = 32 * 1024 * 1024;
+
+static SHARED_TRACKER: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+fn share_serial_lock() -> &'static tokio::sync::Mutex<()> {
+    SHARED_TRACKER.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 #[inline(always)]
-fn get_random_bytes(size: u32) -> Vec<u8> {
+fn fill_random_bytes(buf: &mut [u8]) {
     let mut rng = rand::rng();
-    (0..size).map(|_| rng.random::<u8>()).collect()
+    buf.iter_mut().for_each(|b| *b = rng.random::<u8>());
 }
 
 fn free_port() -> u16 {
@@ -87,7 +94,7 @@ async fn stop_server(handle: JoinHandle<()>) {
     let _ = handle.await;
 }
 
-async fn read_until_double_newline(stream: &mut TcpStream) -> String {
+async fn v2_read_header(stream: &mut TcpStream) -> String {
     let mut response = String::new();
     let mut prev = b'\0';
     let mut buf = [0u8; 1]; // Byte by Byte
@@ -115,7 +122,7 @@ async fn v2_client_upload(port: u16, data: &[u8], filename: &str, file_key: &str
 
     let mut hasher = Sha256::new();
     hasher.update(data);
-    let file_hash = format!("{:x}", hasher.finalize());
+    let file_hash = hex::encode(hasher.finalize()).to_string();
 
     let request = format!(
         "UPLOAD\nfile-name: {}\nfile-size: {}\nfile-hash: {}\nfile-key: {}\n\n",
@@ -129,7 +136,7 @@ async fn v2_client_upload(port: u16, data: &[u8], filename: &str, file_key: &str
     stream.write_all(data).await.unwrap();
     stream.flush().await.unwrap();
 
-    let response = read_until_double_newline(&mut stream).await;
+    let response = v2_read_header(&mut stream).await;
     assert!(response.starts_with("OK\n"), "Upload failed: {}", response);
 
     response
@@ -146,7 +153,7 @@ async fn v2_client_download(port: u16, file_id: &str, file_key: &str) -> Vec<u8>
     let request = format!("DOWNLOAD\nfile-id: {}\nfile-key: {}\n\n", file_id, file_key);
     stream.write_all(request.as_bytes()).await.unwrap();
 
-    let headers = read_until_double_newline(&mut stream).await;
+    let headers = v2_read_header(&mut stream).await;
     assert!(
         !headers.starts_with("ERROR"),
         "Download failed: {}",
@@ -185,7 +192,7 @@ async fn v2_client_download(port: u16, file_id: &str, file_key: &str) -> Vec<u8>
 
     let mut hasher = Sha256::new();
     hasher.update(&received);
-    let received_hash = format!("{:x}", hasher.finalize());
+    let received_hash = hex::encode(hasher.finalize()).to_string();
     assert_eq!(file_hash, received_hash, "Downloaded file hash mismatch");
 
     received
@@ -213,7 +220,7 @@ async fn v1_client_upload(port: u16, data: &[u8], filename: &str, file_key: &str
 
     let mut hasher = Sha256::new();
     hasher.update(data);
-    let file_hash = format!("{:x}", hasher.finalize());
+    let file_hash = hex::encode(hasher.finalize()).to_string();
 
     let request = format!(
         "UPLOAD\nfile-name: {}\nfile-size: {}\nfile-hash: {}\nfile-key: {}\n",
@@ -290,7 +297,7 @@ async fn v1_client_download(port: u16, file_id: &str, file_key: &str) -> Vec<u8>
 
     let mut hasher = Sha256::new();
     hasher.update(&received);
-    let received_hash = format!("{:x}", hasher.finalize());
+    let received_hash = hex::encode(hasher.finalize()).to_string();
     assert_eq!(file_hash, received_hash, "v1 downloaded file hash mismatch");
 
     received
@@ -301,35 +308,55 @@ async fn snapshot_tracker() -> (usize, f64) {
     (lock.total_connections, lock.total_bandwidth_gb)
 }
 
-async fn assert_tracker_metrics(
+async fn wait_for_tracker_metrics(
     base_conns: usize,
     base_bw: f64,
     expected_conn_delta: usize,
     expected_bw_delta: f64,
+    exact_connections: bool,
     protocol_name: &str,
 ) {
-    let (connections, bandwidth) = snapshot_tracker().await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
 
-    // Check delta from baseline (not absolute)
-    let conn_delta = connections.saturating_sub(base_conns);
-    assert_eq!(
-        conn_delta, expected_conn_delta,
-        "{} tracker total_connections mismatch: expected delta {}, got delta {}",
-        protocol_name, expected_conn_delta, conn_delta
-    );
+    loop {
+        let (connections, bandwidth) = snapshot_tracker().await;
+        let conn_delta = connections.saturating_sub(base_conns);
+        let bw_delta = bandwidth - base_bw;
 
-    let bw_delta = bandwidth - base_bw;
-    assert!(
-        (bw_delta - expected_bw_delta).abs() < 1e-6,
-        "{} tracker bandwidth mismatch: expected delta {:.9} GB, got delta {:.9} GB",
-        protocol_name,
-        expected_bw_delta,
-        bw_delta
-    );
+        let connections_ok = if exact_connections {
+            conn_delta == expected_conn_delta
+        } else {
+            conn_delta >= expected_conn_delta
+        };
+        let bandwidth_ok = (bw_delta - expected_bw_delta).abs() < 1e-6;
+
+        if connections_ok && bandwidth_ok {
+            return;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            assert!(
+                connections_ok,
+                "{} tracker total_connections mismatch after wait: expected {}, got {}",
+                protocol_name, expected_conn_delta, conn_delta
+            );
+            assert!(
+                bandwidth_ok,
+                "{} tracker bandwidth mismatch after wait: expected delta {:.9} GB, got delta {:.9} GB",
+                protocol_name, expected_bw_delta, bw_delta
+            );
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_concurrency_v2() {
+    let _guard = share_serial_lock().lock().await;
+
+    cleanup_storage_dir().await;
+
     let port = free_port();
     let server = start_server_v2(port).await;
 
@@ -346,8 +373,9 @@ async fn test_concurrency_v2() {
     let mut tasks = JoinSet::new();
 
     for i in 0..num_clients {
+        let mut payload = vec![0u8; GARBAGE_SIZE];
         tasks.spawn(async move {
-            let payload = get_random_bytes(GARBAGE_SIZE);
+            fill_random_bytes(&mut payload);
             let filename = format!("test_file_{}.bin", i);
             let file_key = format!("key_{}", i);
 
@@ -367,7 +395,15 @@ async fn test_concurrency_v2() {
     }
 
     let expected_bw = num_clients as f64 * GARBAGE_SIZE as f64 / (1024.0 * 1024.0 * 1024.0);
-    assert_tracker_metrics(base_conns, base_bw, 2 * num_clients, expected_bw, "v2").await;
+    wait_for_tracker_metrics(
+        base_conns,
+        base_bw,
+        2 * num_clients,
+        expected_bw,
+        true,
+        "v2",
+    )
+    .await;
 
     stop_server(server).await;
     cleanup_storage_dir().await;
@@ -375,6 +411,10 @@ async fn test_concurrency_v2() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_concurrency_v1() {
+    let _guard = share_serial_lock().lock().await;
+
+    cleanup_storage_dir().await;
+
     let port = free_port();
     let server = start_server_v1(port).await;
 
@@ -391,8 +431,9 @@ async fn test_concurrency_v1() {
     let mut tasks = JoinSet::new();
 
     for i in 0..num_clients {
+        let mut payload = vec![0u8; GARBAGE_SIZE];
         tasks.spawn(async move {
-            let payload = get_random_bytes(GARBAGE_SIZE);
+            fill_random_bytes(&mut payload);
             let filename = format!("v1_test_file_{}.bin", i);
             let file_key = format!("v1_key_{}", i);
 
@@ -414,22 +455,15 @@ async fn test_concurrency_v1() {
     let expected_bw = 2.0 * num_clients as f64 * GARBAGE_SIZE as f64 / (1024.0 * 1024.0 * 1024.0);
     // Note: v1 may sometimes report double connections due to async timing in high concurrency
     // Check minimum expected connections but allow for extra
-    let conn_delta = (SERVER_TRACKER.read().await.total_connections).saturating_sub(base_conns);
-    assert!(
-        conn_delta >= 2 * num_clients,
-        "{} tracker total_connections: expected >= {}, got {}",
-        "v1",
+    wait_for_tracker_metrics(
+        base_conns,
+        base_bw,
         2 * num_clients,
-        conn_delta
-    );
-    let bw_delta = SERVER_TRACKER.read().await.total_bandwidth_gb - base_bw;
-    assert!(
-        (bw_delta - expected_bw).abs() < 1e-6,
-        "{} tracker bandwidth mismatch: expected {:.9} GB, got {:.9} GB",
-        "v1",
         expected_bw,
-        bw_delta
-    );
+        false,
+        "v1",
+    )
+    .await;
 
     stop_server(server).await;
     cleanup_storage_dir().await;

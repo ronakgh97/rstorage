@@ -1,5 +1,3 @@
-#![allow(clippy::wildcard_in_or_patterns)]
-
 use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
@@ -43,33 +41,33 @@ async fn main() -> Result<()> {
                 input.trim().to_string()
             };
 
-            if let Some(protocol) = protocol {
-                let key = match protocol.as_str() {
-                    "v1" => upload_file_v1(file.clone(), file_key, "127.0.0.1", port).await?,
-                    "v2" | _ => upload_file_v2(file.clone(), file_key, "localhost", port).await?,
-                };
+            let key = match protocol.as_str() {
+                "v1" => upload_file_v1(file.clone(), file_key, "127.0.0.1", port).await?,
+                "v2" => upload_file_v2(file.clone(), file_key, "localhost", port).await?,
+                _ => {
+                    eprintln!("Unknown protocol: {}", protocol);
+                    std::process::exit(1);
+                }
+            };
 
-                let catalog_path = get_catalog_path()?;
-                let catalog_dir = catalog_path
-                    .parent()
-                    .ok_or_else(|| anyhow::anyhow!("Invalid catalog path"))?;
-                std::fs::create_dir_all(catalog_dir)?;
+            let catalog_path = get_catalog_path()?;
+            let catalog_dir = catalog_path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("Invalid catalog path"))?;
+            std::fs::create_dir_all(catalog_dir)?;
 
-                // Read existing or new
-                let mut catalog = if catalog_path.exists() {
-                    Catalog::read(&catalog_path).await?
-                } else {
-                    Catalog::default()
-                };
-
-                catalog
-                    .file_map
-                    .insert(key, file.file_name().unwrap().to_string_lossy().to_string());
-
-                catalog.write(&catalog_path).await?;
+            // Read existing or new
+            let mut catalog = if catalog_path.exists() {
+                Catalog::read(&catalog_path).await?
             } else {
-                upload_file_v2(file, file_key, "localhost", port).await?;
-            }
+                Catalog::default()
+            };
+
+            catalog
+                .file_map
+                .insert(key, file.file_name().unwrap().to_string_lossy().to_string());
+
+            catalog.write(&catalog_path).await?;
         }
         Some(ClientCommands::Pull {
             dir,
@@ -107,48 +105,50 @@ async fn main() -> Result<()> {
                 (file_id, file_key)
             };
 
-            if let Some(protocol) = protocol {
-                match protocol.as_str() {
-                    "v1" => {
-                        download_file_v1(file_id, file_key, dir, "127.0.0.1", port).await?;
-                    }
-                    "v2" | _ => {
-                        download_file_v2(file_id, file_key, dir, "localhost", port).await?;
-                    }
+            match protocol.as_str() {
+                "v1" => {
+                    download_file_v1(file_id, file_key, dir, "127.0.0.1", port).await?;
                 }
-            } else {
-                download_file_v2(file_id, file_key, dir, "localhost", port).await?;
+                "v2" => {
+                    download_file_v2(file_id, file_key, dir, "localhost", port).await?;
+                }
+                _ => {
+                    eprintln!("Unknown protocol: {}", protocol);
+                    std::process::exit(1);
+                }
             }
         }
-        Some(ClientCommands::Serve { .. }) => {}
-        Some(ClientCommands::Listen { .. }) => {}
+        Some(ClientCommands::Serve { .. }) => {
+            todo!()
+        }
+        Some(ClientCommands::Listen { .. }) => {
+            todo!()
+        }
         Some(ClientCommands::Ls { .. }) => {
             list_file_map().await?;
         }
-        Some(ClientCommands::Status { port, protocol }) => {
-            let port = port.unwrap_or(3000);
-            let protocol = protocol.unwrap_or_else(|| "v2".to_string());
-            match protocol.as_str() {
-                "v1" => {
-                    let (time, uptime, total_c, bandwidth) =
-                        get_status_v1("localhost", port).await?;
+        Some(ClientCommands::Status { port, protocol }) => match protocol.as_str() {
+            "v1" => {
+                let (time, uptime, total_c, bandwidth) = get_status_v1("localhost", port).await?;
 
-                    println!("Status timestamp: {}", time);
-                    println!("Uptime: {} hrs", uptime);
-                    println!("Total Connections: {}", total_c);
-                    println!("Bandwidth Used: {} gb", bandwidth);
-                }
-                "v2" | _ => {
-                    let (time, uptime, total_c, bandwidth) =
-                        get_status_v2("localhost", port).await?;
-
-                    println!("Status timestamp: {}", time);
-                    println!("Uptime: {} hrs", uptime);
-                    println!("Total Connections: {}", total_c);
-                    println!("Bandwidth Used: {} gb", bandwidth);
-                }
+                println!("Status timestamp: {}", time);
+                println!("Uptime: {} hrs", uptime);
+                println!("Total Connections: {}", total_c);
+                println!("Bandwidth Used: {} gb", bandwidth);
             }
-        }
+            "v2" => {
+                let (time, uptime, total_c, bandwidth) = get_status_v2("localhost", port).await?;
+
+                println!("Status timestamp: {}", time);
+                println!("Uptime: {} hrs", uptime);
+                println!("Total Connections: {}", total_c);
+                println!("Bandwidth Used: {} gb", bandwidth);
+            }
+            _ => {
+                println!("Unknown protocol: {}", protocol);
+                std::process::exit(1);
+            }
+        },
         None => {
             ascii_art();
         }

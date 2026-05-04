@@ -16,6 +16,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 use uuid::Uuid;
 
+// TODO: THIS IS WILL COMPLETELY REWRITTEN USING `UDP` LATER, PROTOCOL_V1 -> TCP WHILE PROTOCOL_V2 -> UDP
+
+/// Entry-point for TCP server, listens for incoming connections and spawns a task for each connection to handle the request
 pub async fn start_tcp_server(
     port: u16,
     max_connections: usize,
@@ -64,6 +67,7 @@ pub async fn start_tcp_server(
     }
 }
 
+/// Handle a single TCP connection, read command and headers, then dispatch to appropriate handler
 #[inline]
 async fn handle_connection(socket: &mut TcpStream, storage_path: &std::path::Path) -> Result<()> {
     let time_start = std::time::Instant::now();
@@ -71,9 +75,10 @@ async fn handle_connection(socket: &mut TcpStream, storage_path: &std::path::Pat
     socket.set_nodelay(true).ok();
 
     // TODO: We may need timeout per chunk or per transfer, but for now, lets cap the headers only
-    // Read header and apply timeouts
+    // Read cmd & headers and apply timeouts
     let (reader_half, mut writer_half) = socket.split();
     let mut reader = BufReader::with_capacity(NETWORK_BUFFER_SIZE, reader_half);
+    // Read command
     let mut command_line = String::new();
     match timeout(READ_TIMEOUT, reader.read_line(&mut command_line)).await {
         Ok(Ok(0)) => {
@@ -87,7 +92,7 @@ async fn handle_connection(socket: &mut TcpStream, storage_path: &std::path::Pat
         }
         Err(_) => {
             // Timeouts
-            let _ = send_error(&mut writer_half, 408, "Request timeout - slow headers").await;
+            let _ = send_error(&mut writer_half, 408, "Request timeout slow headers").await;
             return Err(anyhow::anyhow!("Read timeout"));
         }
     }
@@ -95,7 +100,7 @@ async fn handle_connection(socket: &mut TcpStream, storage_path: &std::path::Pat
     let command = command_line.trim().to_string();
     debug!("Received {} request", command);
 
-    // Read with timeouts
+    // Read headers
     let mut headers = HashMap::with_capacity(12);
     loop {
         let mut line = String::new();
@@ -136,7 +141,7 @@ async fn handle_connection(socket: &mut TcpStream, storage_path: &std::path::Pat
             handle_server_download(&mut reader, &mut writer_half, &headers, storage_path).await?;
         }
         "STATUS" => {
-            send_status(&mut writer_half, 200).await?;
+            send_status(&mut writer_half).await?;
         }
         "DELETE" => {
             send_error(&mut writer_half, 501, "DELETE not implemented").await?;
@@ -152,19 +157,17 @@ async fn handle_connection(socket: &mut TcpStream, storage_path: &std::path::Pat
     Ok(())
 }
 
+/// Sends a generic OK response with optional body, apply write timeout and flush before shutdown
 #[inline]
-async fn send_ok_upload<W: AsyncWriteExt + Unpin>(
-    writer: &mut W,
-    file_id: &str,
-    time_took: f64,
-) -> Result<()> {
-    let response = format!("OK\nfile-id: {}\ntime-took: {}\n\n", file_id, time_took);
+async fn send_ok<W: AsyncWriteExt + Unpin>(writer: &mut W, response_str: &str) -> Result<()> {
+    let response = format!("OK\n{}", response_str);
     timeout(WRITE_TIMEOUT, writer.write_all(response.as_bytes())).await??; // Apply timeout sending header response
     writer.flush().await?;
     writer.shutdown().await?;
     Ok(())
 }
 
+/// Sends a generic ERROR response with code and message, apply write timeout and flush before shutdown
 #[inline]
 async fn send_error<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
@@ -178,8 +181,9 @@ async fn send_error<W: AsyncWriteExt + Unpin>(
     Ok(())
 }
 
+/// Sends a STATUS response with server stats, apply write timeout and flush before shutdown
 #[inline]
-async fn send_status<W: AsyncWriteExt + Unpin>(writer: &mut W, code: u16) -> Result<()> {
+async fn send_status<W: AsyncWriteExt + Unpin>(writer: &mut W) -> Result<()> {
     let uptime_hrs = try_get_uptime_hrs();
     let ongoing = ON_GOINGS.len();
 
@@ -191,8 +195,8 @@ async fn send_status<W: AsyncWriteExt + Unpin>(writer: &mut W, code: u16) -> Res
     let timestamp = chrono::Utc::now().to_rfc3339();
 
     let response = format!(
-        "OK\ncode: {}\ntimestamp: {}\nuptime_hrs: {}\nno_goings_task: {}\ntotal_connections: {}\ntotal_bandwidth_gb: {}\n\n",
-        code, timestamp, ongoing, uptime_hrs, total_connections, total_bandwidth_gb
+        "OK\nTIMESTAMP: {}\nUPTIME_HRS: {}\nON_GOING_TASKS: {}\nTOTAL CONNECTIONS: {}\nTOTAL_BANDWIDTH_GB: {}\n\n",
+        timestamp, ongoing, uptime_hrs, total_connections, total_bandwidth_gb
     );
     timeout(WRITE_TIMEOUT, writer.write_all(response.as_bytes())).await??;
     writer.flush().await?;
@@ -200,6 +204,7 @@ async fn send_status<W: AsyncWriteExt + Unpin>(writer: &mut W, code: u16) -> Res
     Ok(())
 }
 
+/// Handle file upload, read file data in chunks, compute hash on the fly, and save to disk, apply timeouts on headers and file data reading
 async fn handle_server_upload<
     R: AsyncReadExt + AsyncBufReadExt + Unpin,
     W: AsyncWriteExt + Unpin,
@@ -260,15 +265,17 @@ async fn handle_server_upload<
     let mut received: u64 = 0;
     let mut buf = vec![0u8; READ_CHUNK_SIZE];
 
-    while received < file_size {
-        let to_read = std::cmp::min(buf.len(), (file_size - received) as usize);
-        let n = reader.read(&mut buf[..to_read]).await?; // TODO: Timeout here?
-        if n == 0 {
-            break;
+    {
+        while received < file_size {
+            let to_read = std::cmp::min(buf.len(), (file_size - received) as usize);
+            let n = reader.read(&mut buf[..to_read]).await?; // TODO: Timeout here?
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            file.write_all(&buf[..n]).await?;
+            received += n as u64;
         }
-        hasher.update(&buf[..n]);
-        file.write_all(&buf[..n]).await?;
-        received += n as u64;
     }
 
     file.flush().await?;
@@ -284,7 +291,7 @@ async fn handle_server_upload<
         return Ok(());
     }
 
-    let computed_hash = format!("{:x}", hasher.finalize());
+    let computed_hash = hex::encode(hasher.finalize()).to_string();
     if computed_hash != *file_hash {
         tokio::fs::remove_file(&file_path).await.ok();
         warn!(
@@ -308,10 +315,16 @@ async fn handle_server_upload<
 
     ON_GOINGS.remove(&file_id);
 
-    let time_took = time_start.elapsed().as_secs_f64();
-    send_ok_upload(writer, &file_id, time_took).await?;
+    let time_took = time_start.elapsed().as_secs_f32();
+    let response = format!("file-id: {}\ntime-took: {}\n\n", file_id, time_took);
 
-    info!("Upload complete: File-ID: {}", file_id,);
+    send_ok(writer, &response).await?;
+
+    info!(
+        "Upload complete: File-ID: {}... Time_taken: {}F",
+        &file_id[..8].dimmed(),
+        time_took
+    );
 
     let mut lock = SERVER_TRACKER.write().await;
     lock.total_bandwidth_gb += file_size as f64 / (1024.0 * 1024.0 * 1024.0);
@@ -319,6 +332,7 @@ async fn handle_server_upload<
     Ok(())
 }
 
+/// Handle file download, read file metadata, send headers, then stream file data in chunks, apply timeouts on headers and file data writing
 async fn handle_server_download<
     R: AsyncReadExt + AsyncBufReadExt + Unpin,
     W: AsyncWriteExt + Unpin,
@@ -409,7 +423,7 @@ async fn handle_server_download<
     writer.flush().await?;
     writer.shutdown().await?;
 
-    info!("Download complete: File-ID: {}", file_id);
+    info!("Download complete: File-ID: {}", &file_id[..8]);
     Ok(())
 }
 
@@ -564,7 +578,7 @@ pub async fn download_client(
     let progressbar = indicatif::ProgressBar::new(file_size);
     progressbar.set_style(
         indicatif::ProgressStyle::default_bar()
-            .template("[{bar:40.cyan/magenta}] {bytes}/{total_bytes} ({eta})")?
+            .template("[{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")?
             .progress_chars("#>-"),
     );
 

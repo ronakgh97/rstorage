@@ -45,9 +45,9 @@ pub fn file_hasher(path: &Path) -> Result<String> {
     use sha2::{Digest, Sha256};
     let file = std::fs::File::open(path)?;
 
-    let mut buf_reader = std::io::BufReader::with_capacity(3 * 1024 * 1024, file);
+    let mut buf_reader = std::io::BufReader::with_capacity(3 * READ_CHUNK_SIZE, file);
     let mut hasher = Sha256::new();
-    let mut buf = [0u8; 1024 * 64 * 2];
+    let mut buf = [0u8; READ_CHUNK_SIZE * 2];
 
     loop {
         let bytes_read = buf_reader.read(&mut buf)?;
@@ -56,8 +56,9 @@ pub fn file_hasher(path: &Path) -> Result<String> {
         }
         hasher.update(&buf[..bytes_read]);
     }
+    let final_hash = hasher.finalize();
 
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(final_hash).to_string())
 }
 
 #[inline(always)]
@@ -75,16 +76,16 @@ pub fn parse_status_line(status_response: &str) -> (String, String, String, Stri
     let mut total_bandwidth_gb = String::new();
 
     for line in status_response.lines() {
-        if let Some(r) = line.strip_prefix("timestamp: ") {
+        if let Some(r) = line.strip_prefix("TIMESTAMP: ") {
             timestamp = r.trim().to_string();
         }
-        if let Some(r) = line.strip_prefix("uptime_hrs: ") {
+        if let Some(r) = line.strip_prefix("UPTIME_HRS: ") {
             uptime_hrs = r.trim().to_string();
         }
-        if let Some(r) = line.strip_prefix("total_connections: ") {
+        if let Some(r) = line.strip_prefix("TOTAL_CONNECTIONS: ") {
             total_connections = r.trim().to_string();
         }
-        if let Some(r) = line.strip_prefix("total_bandwidth_gb: ") {
+        if let Some(r) = line.strip_prefix("TOTAL_BANDWIDTH_GB: ") {
             total_bandwidth_gb = r.trim().to_string();
         }
     }
@@ -112,11 +113,7 @@ impl Metadata {
     pub fn read_from_disk(path: &PathBuf) -> Result<Self> {
         use postcard::from_bytes;
 
-        let key = try_get_master_key().unwrap_or_else(|| {
-            let new_master_key = generate_master_key();
-            MASTER_KEY.set(new_master_key.clone()).ok();
-            new_master_key
-        });
+        let key = MASTER_KEY.get_or_init(generate_master_key).clone();
 
         let key_bytes = decode(key)?;
         let encrypted = std::fs::read(path)?;
@@ -134,11 +131,7 @@ impl Metadata {
     pub fn save_to_disk(&self, path: &PathBuf) -> Result<()> {
         use postcard::to_allocvec;
 
-        let key = try_get_master_key().unwrap_or_else(|| {
-            let new_master_key = generate_master_key();
-            MASTER_KEY.set(new_master_key.clone()).ok();
-            new_master_key
-        });
+        let key = MASTER_KEY.get_or_init(generate_master_key).clone();
 
         let key_bytes = decode(key)?;
         let serialized = to_allocvec(self)?;
@@ -587,12 +580,3 @@ impl Default for Tracker {
         }
     }
 }
-
-pub struct RelaySession {
-    pub session_id: String,
-    pub sender_socket: Option<tokio::net::TcpStream>,
-    pub receiver_socket: Option<tokio::net::TcpStream>,
-    pub created_at: chrono::DateTime<chrono::Local>,
-}
-
-pub static ACTIVE_SESSION: LazyLock<DashMap<String, RelaySession>> = LazyLock::new(DashMap::new);
